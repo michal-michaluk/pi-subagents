@@ -11,6 +11,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
@@ -67,6 +68,21 @@ import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./workt
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+// Gated runs (`checks`): deterministic bash gates with one automatic retry.
+const CHECK_TIMEOUT_MS = 5 * 60_000;
+const CHECK_OUTPUT_MAX = 2000;
+interface CheckOutcome {
+  cmd: string;
+  ok: boolean;
+  output: string;
+}
+function truncateCheckOutput(s: string): string {
+  const t = s.trim();
+  return t.length > CHECK_OUTPUT_MAX
+    ? `${t.slice(0, CHECK_OUTPUT_MAX)}\n…(truncated ${t.length - CHECK_OUTPUT_MAX} chars)`
+    : t;
 }
 
 export function renderRunningAgentStatus(
@@ -1513,6 +1529,20 @@ Terse command-style prompts produce shallow, generic work.
           description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
         }),
       ),
+      checks: Type.Optional(
+        Type.Array(
+          Type.String({
+            description:
+              "Deterministic bash commands gating this agent's completion — run sequentially in the parent cwd, stop at the first failure. On failure the agent's session is resumed once with feedback from a review agent (see review_prompt), then the checks run again; if they still fail, the result reports both runs and the caller decides. Cannot be combined with run_in_background, isolation:worktree, resume, or schedule.",
+          }),
+        ),
+      ),
+      review_prompt: Type.Optional(
+        Type.String({
+          description:
+            "Scope for the review agent in a gated run: when a check fails, a fresh-context agent (type general) receives this prompt plus the agent's result and the failing check output, and its reply is fed back into the agent session as repair feedback before the checks run again. Omit to skip the review and resume directly with the failing check output.",
+        }),
+      ),
       ...isolationParam(isWorktreeIsolationEnabled()),
       ...scheduleParam,
     }),
@@ -1749,6 +1779,22 @@ Terse command-style prompts produce shallow, generic work.
         modelName,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
+
+      // ---- Gated runs (`checks`): v1 constraints — reject combos we don't support yet ----
+      if (params.checks?.length) {
+        if (params.schedule) {
+          return textResult("Cannot combine `checks` with `schedule` — scheduled jobs run detached, without a caller to receive check outcomes.");
+        }
+        if (params.resume) {
+          return textResult("Cannot combine `checks` with `resume` — gated runs start a fresh agent.");
+        }
+        if (runInBackground) {
+          return textResult("Cannot combine `checks` with `run_in_background` — gated runs complete inline so the caller sees the check outcomes.");
+        }
+        if (isolation === "worktree") {
+          return textResult("Cannot combine `checks` with `isolation:worktree` — checks run against the parent working tree, not the ephemeral worktree copy. Run the checks yourself against the worktree branch instead.");
+        }
+      }
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
@@ -2040,6 +2086,73 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
+      // ---- Gated completion: deterministic checks + one automatic retry ----
+      let checkRuns: { outcomes: CheckOutcome[]; reviewFeedback?: string }[] = [];
+      if (record.status === "completed" && params.checks?.length) {
+        const runChecks = (): CheckOutcome[] => {
+          const outcomes: CheckOutcome[] = [];
+          for (const cmd of params.checks as string[]) {
+            try {
+              const stdout = execSync(cmd, {
+                cwd: ctx.cwd,
+                shell: "/bin/bash",
+                timeout: CHECK_TIMEOUT_MS,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "pipe"],
+              }) as string;
+              outcomes.push({ cmd, ok: true, output: truncateCheckOutput(stdout) });
+            } catch (err) {
+              const e = err as { stdout?: Buffer | string; stderr?: Buffer | string };
+              const output = truncateCheckOutput(`${e.stdout ?? ""}${e.stderr ?? ""}`);
+              outcomes.push({ cmd, ok: false, output });
+              break; // sequential — stop at first failure
+            }
+          }
+          return outcomes;
+        };
+
+        const firstRun = runChecks();
+        checkRuns.push({ outcomes: firstRun });
+        const firstFail = firstRun.find((o) => !o.ok);
+
+        if (firstFail) {
+          // Review in a fresh context, then resume the SAME agent session with feedback.
+          const reviewPrompt = [
+            params.review_prompt ?? "Review the agent's work and produce concise, actionable repair feedback.",
+            "",
+            "[AGENT TASK]",
+            params.prompt,
+            "[AGENT RESULT]",
+            record.result?.trim() || "(no output)",
+            "[FAILING CHECK]",
+            `$ ${firstFail.cmd}`,
+            firstFail.output || "(no output)",
+          ].join("\n");
+          try {
+            const review = await manager.spawnAndWait(pi, ctx, "general", reviewPrompt, {
+              description: `review: ${params.description ?? subagentType}`,
+              model,
+              signal,
+            });
+            const feedback = review.record.result?.trim();
+            if (feedback && fgId) {
+              checkRuns[0].reviewFeedback = feedback;
+              const resumed = await manager.resume(
+                fgId,
+                `A separate review agent produced this feedback on your work (the check \"${firstFail.cmd}\" failed):\n\n${feedback}\n\nFix the issues and make sure the checks pass.`,
+                signal,
+              );
+              if (resumed) {
+                record = resumed;
+              }
+              checkRuns.push({ outcomes: runChecks() });
+            }
+          } catch {
+            // Review or resume failed — keep the first check run; the caller decides.
+          }
+        }
+      }
+
       // Get final token count — from the record, like the cost below it, so the
       // two describe the same work when the agent delegated to nested children.
       const tokenText = formatLifetimeTokens(record);
@@ -2058,9 +2171,19 @@ Terse command-style prompts produce shallow, generic work.
         const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
         if (costText) statsParts.push(costText);
       }
+      const gatedText = checkRuns.length > 0
+        ? "\n\nChecks:\n" +
+          checkRuns.map((run, i) =>
+            `  run ${i + 1}: ${run.outcomes.map((o) => `${o.ok ? "PASS" : "FAIL"} ${o.cmd}`).join(" | ")}` +
+            (run.reviewFeedback ? `\n  review feedback: ${truncateCheckOutput(run.reviewFeedback).slice(0, 600)}` : ""),
+          ).join("\n") +
+          (checkRuns[checkRuns.length - 1].outcomes.some((o) => !o.ok)
+            ? "\n  → checks still failing after the automatic retry — decide the next step (fix the scope, adjust the checks, or re-delegate)."
+            : "")
+        : "";
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
+        (record.result?.trim() || "No output.") + gatedText,
         details,
       );
     },
