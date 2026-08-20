@@ -1533,14 +1533,14 @@ Terse command-style prompts produce shallow, generic work.
         Type.Array(
           Type.String({
             description:
-              "Deterministic bash commands gating this agent's completion — run sequentially in the parent cwd, stop at the first failure. On failure the agent's session is resumed once with feedback from a review agent (see review_prompt), then the checks run again; if they still fail, the result reports both runs and the caller decides. Cannot be combined with run_in_background, isolation:worktree, resume, or schedule.",
+              "Deterministic bash commands gating this agent's completion — run sequentially in the parent cwd, stop at the first failure. After the run a review agent always reviews the work (see review_prompt), its feedback resumes the agent's session once, then the checks run again. The result reports every check run and the review feedback. Cannot be combined with run_in_background, isolation:worktree, resume, or schedule.",
           }),
         ),
       ),
       review_prompt: Type.Optional(
         Type.String({
           description:
-            "Scope for the review agent in a gated run: when a check fails, a fresh-context agent (type general) receives this prompt plus the agent's result and the failing check output, and its reply is fed back into the agent session as repair feedback before the checks run again. Omit to skip the review and resume directly with the failing check output.",
+            "Scope for the review agent in a gated run: on every completed run (checks PASS or FAIL) a fresh-context agent (type general) receives this prompt plus the agent's result and the check outcomes, and its reply is fed back into the agent session as repair feedback before the checks run again. Omit to use a default review scope.",
         }),
       ),
       ...isolationParam(isWorktreeIsolationEnabled()),
@@ -2115,41 +2115,41 @@ Terse command-style prompts produce shallow, generic work.
         checkRuns.push({ outcomes: firstRun });
         const firstFail = firstRun.find((o) => !o.ok);
 
-        if (firstFail) {
-          // Review in a fresh context, then resume the SAME agent session with feedback.
-          const reviewPrompt = [
-            params.review_prompt ?? "Review the agent's work and produce concise, actionable repair feedback.",
-            "",
-            "[AGENT TASK]",
-            params.prompt,
-            "[AGENT RESULT]",
-            record.result?.trim() || "(no output)",
-            "[FAILING CHECK]",
-            `$ ${firstFail.cmd}`,
-            firstFail.output || "(no output)",
-          ].join("\n");
-          try {
-            const review = await manager.spawnAndWait(pi, ctx, "general", reviewPrompt, {
-              description: `review: ${params.description ?? subagentType}`,
-              model,
+        // Review ALWAYS runs (checks PASS or FAIL) — an independent quality
+        // layer in a fresh context. Its feedback resumes the SAME agent session,
+        // then the checks run again. The reviewer reports only — no file edits.
+        const reviewPrompt = [
+          params.review_prompt ??
+            "Review the agent's work against the task. Report any issues that need fixing, or state clearly that it is ready. Do not modify any files — report findings only.",
+          "",
+          "[AGENT TASK]",
+          params.prompt,
+          "[AGENT RESULT]",
+          record.result?.trim() || "(no output)",
+          "[CHECKS — run 1]",
+          firstRun.map((o) => `${o.ok ? "PASS" : "FAIL"} $ ${o.cmd}${!o.ok && o.output ? `\n${o.output}` : ""}`).join("\n"),
+        ].join("\n");
+        try {
+          const review = await manager.spawnAndWait(pi, ctx, "general", reviewPrompt, {
+            description: `review: ${params.description ?? subagentType}`,
+            model,
+            signal,
+          });
+          const feedback = review.record.result?.trim();
+          if (feedback && fgId) {
+            checkRuns[0].reviewFeedback = feedback;
+            const resumed = await manager.resume(
+              fgId,
+              `A separate review agent produced this feedback on your work${firstFail ? ` (the check \"${firstFail.cmd}\" failed)` : ""}:\n\n${feedback}\n\nApply the feedback${firstFail ? " and fix the failing check" : ""} — make sure the checks pass.`,
               signal,
-            });
-            const feedback = review.record.result?.trim();
-            if (feedback && fgId) {
-              checkRuns[0].reviewFeedback = feedback;
-              const resumed = await manager.resume(
-                fgId,
-                `A separate review agent produced this feedback on your work (the check \"${firstFail.cmd}\" failed):\n\n${feedback}\n\nFix the issues and make sure the checks pass.`,
-                signal,
-              );
-              if (resumed) {
-                record = resumed;
-              }
-              checkRuns.push({ outcomes: runChecks() });
+            );
+            if (resumed) {
+              record = resumed;
             }
-          } catch {
-            // Review or resume failed — keep the first check run; the caller decides.
+            checkRuns.push({ outcomes: runChecks() });
           }
+        } catch {
+          // Review or resume failed — keep the first check run; the caller decides.
         }
       }
 
