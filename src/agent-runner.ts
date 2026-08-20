@@ -887,25 +887,38 @@ export async function runAgent(
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  // Frontmatter wins when it says anything; otherwise the project default,
-  // which `rememberAgents` supplies for top-level agents only. Same precedence
-  // as `outputTranscript`.
-  const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  // Every subagent persists its session, always. The parent's status line
+  // aggregates cost across the subagent tree, which requires a session file
+  // per agent — so this deliberately ignores the `persist_session` frontmatter
+  // and the `rememberAgents` project default (nested runs included).
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
     ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
-    : persistSession
-      ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
-          // Optional metadata — it only nests the subagent under its spawner in
-          // `/resume`. Until `rememberAgents` this ran solely for the rare
-          // `persist_session: true` agent; now it runs for every spawn, so a
-          // context without a session manager (a bare programmatic ctx) must
-          // still persist rather than take the whole spawn down.
-          parentSession: ctx.sessionManager?.getSessionFile?.(),
-        })
-      : SessionManager.inMemory(effectiveCwd);
+    : SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
+        // Nests the subagent under its spawner in `/resume`; the parent's cost
+        // aggregation also keys off this link.
+        parentSession: ctx.sessionManager?.getSessionFile?.(),
+      });
+
+  // Identity marker for the parent's cost aggregation. `parentSession` alone
+  // can't distinguish a subagent child from a fork (both set it), so stamp
+  // every persisted subagent session with its agent type and parent session
+  // id. SessionManager buffers the file until the first assistant message, so
+  // the marker lands on disk together with the run. Best-effort: a failure
+  // only loses the marker, never the spawn.
+  if (!options.resumeSessionFile) {
+    try {
+      sessionManager.appendCustomEntry("subagents:session", {
+        agentType: type,
+        agentName: agentConfig?.name,
+        parentSessionId: ctx.sessionManager?.getSessionId(),
+      });
+    } catch {
+      // Marker is best-effort; cost aggregation just won't see this agent.
+    }
+  }
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
