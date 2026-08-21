@@ -1736,7 +1736,7 @@ Terse command-style prompts produce shallow, generic work.
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
-      const runInBackground = resolvedConfig.runInBackground;
+      let runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
       // Whether this spawn writes its .output transcript. Per-agent
@@ -1780,7 +1780,7 @@ Terse command-style prompts produce shallow, generic work.
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
 
-      // ---- Gated runs (`checks`): v1 constraints — reject combos we don't support yet ----
+      // ---- Gated runs (`checks`): v1 constraints ----
       if (params.checks?.length) {
         if (params.schedule) {
           return textResult("Cannot combine `checks` with `schedule` — scheduled jobs run detached, without a caller to receive check outcomes.");
@@ -1788,12 +1788,15 @@ Terse command-style prompts produce shallow, generic work.
         if (params.resume) {
           return textResult("Cannot combine `checks` with `resume` — gated runs start a fresh agent.");
         }
-        if (runInBackground) {
-          return textResult("Cannot combine `checks` with `run_in_background` — gated runs complete inline so the caller sees the check outcomes.");
+        if (params.run_in_background === true) {
+          return textResult("Cannot combine `checks` with `run_in_background: true` — gated runs complete inline so the caller sees the check outcomes.");
         }
         if (isolation === "worktree") {
           return textResult("Cannot combine `checks` with `isolation:worktree` — checks run against the parent working tree, not the ephemeral worktree copy. Run the checks yourself against the worktree branch instead.");
         }
+        // Checks imply an inline run — override the backgroundByDefault default.
+        runInBackground = false;
+        agentInvocation.runInBackground = false;
       }
 
       // ---- Schedule: register a job, don't spawn now ----
