@@ -175,6 +175,36 @@ export interface AgentRecord {
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
   worktreeResult?: { hasChanges: boolean; branch?: string };
+  /**
+   * The directory the agent's tools actually operated in — the gate's checks
+   * must run here, not at the parent cwd. Resolved as worktree override >
+   * caller-supplied `cwd` > parent cwd, mirroring `runAgent`'s `effectiveCwd`.
+   * Captured on the record so the gate can find the real working tree even
+   * when the agent ran in a monorepo workspace or a multi-repo workspace cwd.
+   */
+  workingCwd?: string;
+  /**
+   * Gated-run state: when `SpawnOptions.gate` is present, the subagent is not
+   * "done" when its task settles — checks, an independent review, and optional
+   * rework must all settle first. The manager holds the record in flight
+   * (`status` stays running) and defers finalize (notification + worktree
+   * cleanup) until the whole package settles.
+   */
+  gate?: {
+    checks: string[];
+    reviewPrompt?: string;
+    maxReworks: number;
+    /** Number of rework passes already run. */
+    reworksUsed: number;
+    /** Resolve the package promise — called by the gate runner at package settle. */
+    resolve?: (text: string) => void;
+    /** Spawn-time repo base for worktree cleanup at package settle. */
+    baseCwd?: string;
+    /** Whether the cwd was caller-supplied (branch note wording). */
+    customCwd?: string;
+    /** Spawn description, used for worktree cleanup options. */
+    description?: string;
+  };
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Path to the streaming output transcript file. */

@@ -147,6 +147,13 @@ interface SpawnOptions {
   cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
   invocation?: AgentInvocation;
+  /**
+   * Gated run: the subagent is not "done" at task settle — the gate runner
+   * (checks → review → optional rework) runs first, and finalization
+   * (notification + worktree cleanup + promise resolution) is deferred until
+   * the whole package settles. See `AgentRecord.gate`.
+   */
+  gate?: { checks: string[]; reviewPrompt?: string; maxReworks?: number };
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
@@ -255,6 +262,13 @@ export class AgentManager {
   /** Number of currently running background agents. */
   private runningBackground = 0;
 
+  /**
+   * Gated-run hook, set by index.ts. Called when a gated agent's TASK settles
+   * (status == "completed") but the package (checks → review → rework) has not.
+   * The runner owns the loop and must eventually call `finalizeGated(record)`.
+   */
+  gateRunner?: (record: AgentRecord) => Promise<void>;
+
   constructor(
     onComplete?: OnAgentComplete,
     maxConcurrent = DEFAULT_MAX_CONCURRENT,
@@ -282,6 +296,63 @@ export class AgentManager {
   getMaxConcurrent(): number {
     return this.maxConcurrent;
   }
+
+  /**
+   * Finalize a gated run once the whole package (checks → review → rework)
+   * settles. This is the single deferred-finalize point: it runs the worktree
+   * cleanup and branch note that the spawn path would have done at task end,
+   * fires `onComplete` (respecting background/foreground), and resolves the
+   * record's package promise so `spawnAndWait` / `get_subagent_result(wait)`
+   * unblock with the final result.
+   *
+   * Idempotent-safe: only settles a record whose gate is still open. The gate
+   * runner calls this once; a racing spawn-path finalize is impossible because
+   * a gated record never reaches the spawn-path finalize (see startAgent).
+   */
+  finalizeGated(record: AgentRecord): void {
+    const gate = record.gate;
+    if (!gate) return; // not a gated record — nothing to do
+    if (!gate.resolve) return; // already settled
+
+    // Worktree cleanup — deferred from task end to now, so the copy stayed
+    // alive for checks/review/rework. Reuses the params captured at spawn.
+    if (record.worktree && gate.baseCwd) {
+      try {
+        const wtResult = cleanupWorktree(gate.baseCwd, record.worktree, gate.description ?? record.description);
+        record.worktreeResult = wtResult;
+        if (wtResult.hasChanges && wtResult.branch) {
+          const repoNote = gate.customCwd !== undefined ? ` in \`${gate.baseCwd}\`` : "";
+          record.result = (record.result ?? "") +
+            `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${gate.customCwd !== undefined ? ` (run in \`${gate.baseCwd}\`)` : ""}`;
+        }
+      } catch { /* ignore cleanup errors */ }
+    }
+
+    this.abortOwnedChildren(record.id);
+
+    // Mark terminal: the package is done. If checks still fail, the caller
+    // (Q7) wants status=completed so the main agent reads the report and
+    // decides — no dangling subagent — so keep whatever status the gate
+    // runner set (default completed).
+    record.completedAt ??= Date.now();
+    if (record.status === "running") record.status = "completed";
+
+    // Fire onComplete with the same background/foreground semantics as spawn.
+    if (!record.isBackground) {
+      record.resultConsumed = true;
+      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    } else {
+      if (occupiesPoolSlot(record)) this.runningBackground--;
+      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+      this.drainQueue();
+    }
+
+    // Resolve the package promise so waiters unblock.
+    const resolve = gate.resolve;
+    gate.resolve = undefined;
+    resolve(record.result ?? "");
+  }
+
 
   /**
    * Spawn an agent and return its ID immediately (for background use).
@@ -399,6 +470,32 @@ export class AgentManager {
       this.worktreeRepos.add(baseCwd);
     }
 
+    // The directory the agent's tools operate in, captured for the gate's
+    // checks (worktree > caller cwd > parent cwd). See `AgentRecord.workingCwd`.
+    record.workingCwd = worktreeCwd ?? customCwd ?? ctx.cwd;
+
+    // Gated run: the package promise resolves at package settle, not task settle.
+    // `resolve` is stashed on the record so the gate runner (index.ts) can
+    // finalize; `spawnAndWait` / `get_subagent_result` wait on this promise.
+    if (options.gate) {
+      let resolvePkg!: (text: string) => void;
+      const pkgPromise = new Promise<string>((resolve) => { resolvePkg = resolve; });
+      record.promise = pkgPromise;
+      record.gate = {
+        checks: options.gate.checks,
+        reviewPrompt: options.gate.reviewPrompt,
+        maxReworks: options.gate.maxReworks ?? 1,
+        reworksUsed: 0,
+        resolve: resolvePkg,
+        // Worktree cleanup + branch-note need spawn-time state that `finalizeGated`
+        // won't have later (the record keeps the worktree, but not the repo base
+        // or whether the cwd was caller-supplied). Capture it now.
+        baseCwd,
+        customCwd,
+        description: options.description,
+      };
+    }
+
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
@@ -504,6 +601,27 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
+        // ---- GATED RUN: task done, package not. ----
+        // Keep the record in flight (status stays "running"), do NOT clean up the
+        // worktree and do NOT resolve the package promise / fire onComplete.
+        // Hand off to the gate runner, which owns the checks → review → rework
+        // loop and calls `finalizeGated` at package settle. The task may have
+        // failed (error/aborted) — in that case there is nothing worth gating,
+        // so finalize immediately.
+        if (record.gate) {
+          if (record.status === "completed" && this.gateRunner) {
+            // restore the transient task status to running so the record reads
+            // as in-flight for the whole package (widget, get_subagent_result).
+            record.status = "running";
+            record.completedAt = undefined;
+            record.result = responseText;
+            void this.gateRunner(record).catch(() => this.finalizeGated(record));
+          } else {
+            this.finalizeGated(record);
+          }
+          return responseText;
+        }
+
         // Clean up worktree if used
         if (record.worktree) {
           const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
@@ -547,6 +665,12 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
+        // Gated run that errored: nothing worth gating, finalize now.
+        if (record.gate) {
+          this.finalizeGated(record);
+          return "";
+        }
+
         // Best-effort worktree cleanup on error
         if (record.worktree) {
           try {
@@ -570,9 +694,12 @@ export class AgentManager {
         return "";
       });
 
-    record.promise = promise;
-
-    // Notify caller that spawn is complete (record is in the map, promise is set).
+    // For a gated run the package promise was set at spawn (resolves at package
+    // settle); the task promise must NOT overwrite it, or a waiter would unblock
+    // at task end instead of package end.
+    if (!record.gate) {
+      record.promise = promise;
+    }
     // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
     // Used by spawnAndWait to let the caller set up output files before streaming starts.
     this.onSpawned?.(id);

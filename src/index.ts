@@ -10,8 +10,8 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
@@ -708,6 +708,117 @@ export default function (pi: ExtensionAPI) {
   let rpcHandle: RpcHandle | undefined;
   /** Whether the `@handle` autocomplete wrapper has been stacked on pi's provider. */
   let mentionProviderRegistered = false;
+
+  // ---- Gated runs: the package (checks → review → rework) ----------------
+  // The manager defers finalizing a gated record to package settle. This
+  // runner owns the loop. It runs the checks against the agent's ACTUAL
+  // working cwd (`record.workingCwd` — worktree override > caller cwd > parent
+  // cwd, so monorepo/worktree runs gate the right tree), spawns one
+  // independent review agent AT that cwd so it inspects real files, feeds the
+  // review's feedback back to the task agent via a foreground `resume` (which
+  // reuses the session — and its worktree — and does NOT re-fire onComplete),
+  // then re-runs the checks. At package settle it calls `manager.finalizeGated`,
+  // which does the deferred worktree cleanup + onComplete + promise resolution.
+  //
+  // The review agent is NOT recursively gated: review IS the quality gate.
+  // Review failures surface as feedback to the task agent; they never trigger
+  // their own checks/review loop.
+  const runGatedPackage = async (record: AgentRecord): Promise<void> => {
+    const gate = record.gate;
+    if (!gate?.resolve) return;
+
+    const checksCwd = record.workingCwd ?? currentCtx?.cwd;
+    const runChecks = (): CheckOutcome[] => {
+      const outcomes: CheckOutcome[] = [];
+      for (const cmd of gate.checks) {
+        try {
+          const stdout = execSync(cmd, {
+            cwd: checksCwd,
+            shell: "/bin/bash",
+            timeout: CHECK_TIMEOUT_MS,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          }) as string;
+          outcomes.push({ cmd, ok: true, output: truncateCheckOutput(stdout) });
+        } catch (err) {
+          const e = err as { stdout?: Buffer | string; stderr?: Buffer | string };
+          outcomes.push({ cmd, ok: false, output: truncateCheckOutput(`${e.stdout ?? ""}${e.stderr ?? ""}`) });
+          break; // sequential — stop at first failure
+        }
+      }
+      return outcomes;
+    };
+
+    const buildReviewPrompt = (result: string, outcomes: CheckOutcome[]): string => [
+      gate.reviewPrompt ??
+        "Review the agent's work against the task. Report any issues that need fixing, or state clearly that it is ready. Do not modify any files — report findings only.",
+      "",
+      "[AGENT TASK]",
+      record.description ?? "",
+      "[AGENT RESULT]",
+      result.trim() || "(no output)",
+      "[CHECKS]",
+      outcomes.map((o) => `${o.ok ? "PASS" : "FAIL"} $ ${o.cmd}${!o.ok && o.output ? `\n${o.output}` : ""}`).join("\n"),
+    ].join("\n");
+
+    const firstRun = runChecks();
+    const firstFail = firstRun.find((o) => !o.ok);
+    const checkRuns: CheckOutcome[][] = [firstRun];
+    let finalResult = record.result ?? "";
+    let reviewFeedback: string | undefined;
+
+    // Review ALWAYS runs (checks PASS or FAIL) — an independent quality layer
+    // in a fresh context, spawned AT the working cwd so it inspects real files.
+    const ctx = currentCtx;
+    if (ctx) {
+      const reviewPrompt = buildReviewPrompt(finalResult, firstRun);
+      try {
+        const review = await manager.spawnAndWait(pi, ctx, "general", reviewPrompt, {
+          description: `review: ${record.description ?? record.type}`,
+          cwd: checksCwd,
+          model: ctx.model,
+          signal: record.abortController?.signal,
+        });
+        reviewFeedback = review.record.result?.trim();
+      } catch {
+        // Review failed — fall through with no feedback; the caller sees the checks.
+      }
+    }
+
+    // Feed review feedback back to the task agent once (maxReworks pass).
+    if (reviewFeedback && gate.reworksUsed < gate.maxReworks && record.id) {
+      gate.reworksUsed++;
+      const resumed = await manager.resume(
+        record.id,
+        `A separate review agent produced this feedback on your work${firstFail ? ` (the check "${firstFail.cmd}" failed)` : ""}:\n\n${reviewFeedback}\n\nApply the feedback${firstFail ? " and fix the failing check" : ""} — make sure the checks pass.`,
+        record.abortController?.signal,
+        {}, // foreground resume — inline, reuses the session+worktree, no re-notify
+      );
+      if (resumed) {
+        record.result = resumed.result ?? record.result;
+        finalResult = record.result ?? "";
+        checkRuns.push(runChecks());
+      }
+    }
+
+    // Annotate the final result with the checks report, then finalize.
+    record.result = (finalResult.trim() || "No output.") +
+      (checkRuns.length > 0
+        ? "\n\nChecks:\n" +
+          checkRuns.map((runs, i) =>
+            `  run ${i + 1}: ${runs.map((o) => `${o.ok ? "PASS" : "FAIL"} ${o.cmd}`).join(" | ")}`,
+          ).join("\n") +
+          (checkRuns[checkRuns.length - 1].some((o) => !o.ok)
+            ? "\n  → checks still failing after the automatic retry — decide the next step (fix the scope, adjust the checks, or re-delegate)."
+            : "")
+        : "");
+    manager.finalizeGated(record);
+  };
+
+  // Route gated spawns to the package runner. Set once at factory time; the
+  // closure reads `currentCtx` per invocation so the review spawns into the
+  // live session.
+  manager.gateRunner = runGatedPackage;
 
   // ---- Subagent scheduler ----
   // Session-scoped: store is constructed inside session_start once sessionId
@@ -1533,14 +1644,14 @@ Terse command-style prompts produce shallow, generic work.
         Type.Array(
           Type.String({
             description:
-              "Deterministic bash commands gating this agent's completion — run sequentially in the parent cwd, stop at the first failure. After the run a review agent always reviews the work (see review_prompt), its feedback resumes the agent's session once, then the checks run again. The result reports every check run and the review feedback. Cannot be combined with run_in_background, isolation:worktree, resume, or schedule.",
+              "Deterministic bash commands gating this agent's completion — run sequentially in the agent's working cwd (worktree override > caller cwd > parent cwd), stop at the first failure. The subagent is NOT done when its task settles: checks, an independent review (see review_prompt), and one rework pass must all settle first, then the agent finalizes (deferred notification; worktree copy is kept alive through the package). The result carries the checks/review report. Works with run_in_background (you'll be notified only when the package settles). Currently refused with resume or schedule.",
           }),
         ),
       ),
       review_prompt: Type.Optional(
         Type.String({
           description:
-            "Scope for the review agent in a gated run: on every completed run (checks PASS or FAIL) a fresh-context agent (type general) receives this prompt plus the agent's result and the check outcomes, and its reply is fed back into the agent session as repair feedback before the checks run again. Omit to use a default review scope.",
+            "Scope for the review agent in a gated run: on every completed run (checks PASS or FAIL) a fresh-context agent (type general) receives this prompt plus the agent's result and the check outcomes, and its reply is fed back into the task agent's session as repair feedback before the checks run again. Omit to use a default review scope. The review agent is not itself gated (review IS the quality gate) — it never triggers its own checks/review loop.",
         }),
       ),
       ...isolationParam(isWorktreeIsolationEnabled()),
@@ -1780,24 +1891,18 @@ Terse command-style prompts produce shallow, generic work.
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
 
-      // ---- Gated runs (`checks`): v1 constraints ----
-      if (params.checks?.length) {
-        if (params.schedule) {
-          return textResult("Cannot combine `checks` with `schedule` — scheduled jobs run detached, without a caller to receive check outcomes.");
-        }
-        if (params.resume) {
-          return textResult("Cannot combine `checks` with `resume` — gated runs start a fresh agent.");
-        }
-        if (params.run_in_background === true) {
-          return textResult("Cannot combine `checks` with `run_in_background: true` — gated runs complete inline so the caller sees the check outcomes.");
-        }
-        if (isolation === "worktree") {
-          return textResult("Cannot combine `checks` with `isolation:worktree` — checks run against the parent working tree, not the ephemeral worktree copy. Run the checks yourself against the worktree branch instead.");
-        }
-        // Checks imply an inline run — override the backgroundByDefault default.
-        runInBackground = false;
-        agentInvocation.runInBackground = false;
+      // ---- Gated runs (`checks`): the package is task+check+review+rework. ----
+      // `gate` rides the spawn options; the manager defers finalization until
+      // the whole package settles (see `runGatedPackage`). Valid with
+      // run_in_background (deferred notification), worktree (copy stays alive),
+      // and resume. Only `schedule` is still unsupported in v1 — the scheduler
+      // fire path doesn't thread `gate` yet (follow-up).
+      if (params.checks?.length && (params.schedule || params.resume)) {
+        return textResult("Cannot combine `checks` with `schedule` or `resume` in this version — gated resume/schedule are a follow-up.");
       }
+      const gateParams = params.checks?.length
+        ? { checks: params.checks as string[], reviewPrompt: params.review_prompt as string | undefined, maxReworks: 1 }
+        : undefined;
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
@@ -1937,6 +2042,7 @@ Terse command-style prompts produce shallow, generic work.
           thinkingLevel: thinking,
           isBackground: true,
           isolation,
+          gate: gateParams,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
           ...bgCallbacks,
@@ -2066,6 +2172,7 @@ Terse command-style prompts produce shallow, generic work.
           inheritContext,
           thinkingLevel: thinking,
           isolation,
+          gate: gateParams,
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
@@ -2089,73 +2196,6 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      // ---- Gated completion: deterministic checks + one automatic retry ----
-      let checkRuns: { outcomes: CheckOutcome[]; reviewFeedback?: string }[] = [];
-      if (record.status === "completed" && params.checks?.length) {
-        const runChecks = (): CheckOutcome[] => {
-          const outcomes: CheckOutcome[] = [];
-          for (const cmd of params.checks as string[]) {
-            try {
-              const stdout = execSync(cmd, {
-                cwd: ctx.cwd,
-                shell: "/bin/bash",
-                timeout: CHECK_TIMEOUT_MS,
-                encoding: "utf8",
-                stdio: ["ignore", "pipe", "pipe"],
-              }) as string;
-              outcomes.push({ cmd, ok: true, output: truncateCheckOutput(stdout) });
-            } catch (err) {
-              const e = err as { stdout?: Buffer | string; stderr?: Buffer | string };
-              const output = truncateCheckOutput(`${e.stdout ?? ""}${e.stderr ?? ""}`);
-              outcomes.push({ cmd, ok: false, output });
-              break; // sequential — stop at first failure
-            }
-          }
-          return outcomes;
-        };
-
-        const firstRun = runChecks();
-        checkRuns.push({ outcomes: firstRun });
-        const firstFail = firstRun.find((o) => !o.ok);
-
-        // Review ALWAYS runs (checks PASS or FAIL) — an independent quality
-        // layer in a fresh context. Its feedback resumes the SAME agent session,
-        // then the checks run again. The reviewer reports only — no file edits.
-        const reviewPrompt = [
-          params.review_prompt ??
-            "Review the agent's work against the task. Report any issues that need fixing, or state clearly that it is ready. Do not modify any files — report findings only.",
-          "",
-          "[AGENT TASK]",
-          params.prompt,
-          "[AGENT RESULT]",
-          record.result?.trim() || "(no output)",
-          "[CHECKS — run 1]",
-          firstRun.map((o) => `${o.ok ? "PASS" : "FAIL"} $ ${o.cmd}${!o.ok && o.output ? `\n${o.output}` : ""}`).join("\n"),
-        ].join("\n");
-        try {
-          const review = await manager.spawnAndWait(pi, ctx, "general", reviewPrompt, {
-            description: `review: ${params.description ?? subagentType}`,
-            model,
-            signal,
-          });
-          const feedback = review.record.result?.trim();
-          if (feedback && fgId) {
-            checkRuns[0].reviewFeedback = feedback;
-            const resumed = await manager.resume(
-              fgId,
-              `A separate review agent produced this feedback on your work${firstFail ? ` (the check \"${firstFail.cmd}\" failed)` : ""}:\n\n${feedback}\n\nApply the feedback${firstFail ? " and fix the failing check" : ""} — make sure the checks pass.`,
-              signal,
-            );
-            if (resumed) {
-              record = resumed;
-            }
-            checkRuns.push({ outcomes: runChecks() });
-          }
-        } catch {
-          // Review or resume failed — keep the first check run; the caller decides.
-        }
-      }
-
       // Get final token count — from the record, like the cost below it, so the
       // two describe the same work when the agent delegated to nested children.
       const tokenText = formatLifetimeTokens(record);
@@ -2174,19 +2214,10 @@ Terse command-style prompts produce shallow, generic work.
         const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
         if (costText) statsParts.push(costText);
       }
-      const gatedText = checkRuns.length > 0
-        ? "\n\nChecks:\n" +
-          checkRuns.map((run, i) =>
-            `  run ${i + 1}: ${run.outcomes.map((o) => `${o.ok ? "PASS" : "FAIL"} ${o.cmd}`).join(" | ")}` +
-            (run.reviewFeedback ? `\n  review feedback: ${truncateCheckOutput(run.reviewFeedback).slice(0, 600)}` : ""),
-          ).join("\n") +
-          (checkRuns[checkRuns.length - 1].outcomes.some((o) => !o.ok)
-            ? "\n  → checks still failing after the automatic retry — decide the next step (fix the scope, adjust the checks, or re-delegate)."
-            : "")
-        : "";
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output.") + gatedText,
+        (record.result?.trim() || "No output.") +
+        (record.gate ? "\n\n(Gated run — see the checks/review report appended to the result.)" : ""),
         details,
       );
     },

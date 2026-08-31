@@ -1,0 +1,106 @@
+/**
+ * gated-tool-wiring.test.ts — the Agent tool's `checks`/`review_prompt` params
+ * at the boundary: how the tool now accepts `checks` with `run_in_background`
+ * (previously refused), still refuses `resume`/`schedule` (v1 follow-up), and
+ * that a gated background spawn returns the agent ID immediately (deferred
+ * package notification) while a gated foreground spawn blocks for the package.
+ *
+ * Mirrors background-by-default.test.ts: mock runAgent at the extension level,
+ * call the real `Agent` tool, assert on the tool result.
+ */
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn() };
+});
+
+import { runAgent } from "../src/agent-runner.js";
+import subagentsExtension from "../src/index.js";
+
+function makePi() {
+  const tools = new Map<string, any>();
+  const pi = {
+    registerMessageRenderer: vi.fn(),
+    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
+    registerCommand: vi.fn(),
+    on: vi.fn(),
+    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+    appendEntry: vi.fn(),
+    sendMessage: vi.fn(),
+  } as any;
+  return { pi, tools };
+}
+
+function ctx() {
+  return {
+    hasUI: false,
+    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+    cwd: process.cwd(),
+    model: undefined,
+    modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
+    sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
+    getSystemPrompt: vi.fn(() => "parent"),
+  } as any;
+}
+
+const textOf = (r: any): string => r.content[0].text;
+
+function settled(text = "done") {
+  vi.mocked(runAgent).mockResolvedValue({
+    responseText: text,
+    session: { dispose: vi.fn(), messages: [], prompt: vi.fn(), subscribe: vi.fn() } as any,
+    aborted: false,
+    steered: false,
+  } as any);
+}
+
+function spawn(tools: Map<string, any>, params: Record<string, unknown> = {}) {
+  return tools.get("Agent").execute(
+    "tc",
+    { prompt: "go", description: "d", subagent_type: "general-purpose", ...params },
+    undefined,
+    undefined,
+    ctx(),
+  );
+}
+
+async function runOnce(params: Record<string, unknown> = {}) {
+  const { pi, tools } = makePi();
+  subagentsExtension(pi);
+  settled();
+  return { out: textOf(await spawn(tools, params)) };
+}
+
+function fresh() {
+  const { pi, tools } = makePi();
+  subagentsExtension(pi);
+  settled();
+  return tools;
+}
+
+describe("gated tool wiring", () => {
+  it("accepts checks with run_in_background: true — no longer refuses it", async () => {
+    const { out } = await runOnce({ checks: ["true"], run_in_background: true });
+    // Returns the agent ID immediately (background), NOT the result.
+    expect(out).toContain("Agent ID:");
+    expect(out).not.toContain("Cannot combine `checks`");
+  });
+
+  it("still refuses checks with resume (v1 follow-up)", async () => {
+    const tools = fresh();
+    const out = textOf(await spawn(tools, { checks: ["true"], resume: "nope" }));
+    expect(out).toMatch(/Cannot combine `checks` with `schedule` or `resume`/);
+  });
+
+  it("still refuses checks with schedule (v1 follow-up)", async () => {
+    const tools = fresh();
+    const out = textOf(await spawn(tools, { checks: ["true"], schedule: "10m" }));
+    expect(out).toMatch(/Cannot combine `checks` with `schedule` or `resume`/);
+  });
+
+  it("starts a gated background run when checks are given without name", async () => {
+    const { out } = await runOnce({ checks: ["true"] });
+    expect(out).toContain("Agent ID:");
+  });
+});
