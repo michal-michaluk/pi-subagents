@@ -407,10 +407,9 @@ export interface RunOptions {
   resumeSessionFile?: string;
   /**
    * True when another agent spawned this one. Only top-level agents get a
-   * handle, so only they can be reopened by name — which is the whole reason
-   * `rememberAgents` persists a session at all. A nested run's transcript would
-   * be unreachable by anything, so it stays in memory unless its own
-   * frontmatter asks otherwise.
+   * handle, so only they can be reopened by name. Nested runs are never
+   * addressable by a handle, but every subagent still persists its session so
+   * the parent can aggregate cost across the tree.
    */
   nested?: boolean;
   /** Override working directory (e.g. for worktree isolation). */

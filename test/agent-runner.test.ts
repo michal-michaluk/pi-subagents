@@ -828,7 +828,9 @@ describe("agent-runner session persistence", () => {
     }));
   });
 
-  it("keeps the session in memory when rememberAgents is off", async () => {
+  it("persists even when rememberAgents is off", async () => {
+    // The project default is deliberately ignored: every subagent persists its
+    // session so the parent can aggregate cost across the subagent tree.
     setRememberAgents(false);
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
     const { session } = createSession("OK");
@@ -836,21 +838,21 @@ describe("agent-runner session persistence", () => {
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
-    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
   });
 
-  it("lets frontmatter override rememberAgents in both directions", async () => {
-    // The setting is only a default. An agent that declares itself ephemeral
-    // stays ephemeral with the setting on...
+  it("persists regardless of persistSession frontmatter or rememberAgents", async () => {
+    // `persist_session` frontmatter and `rememberAgents` are both ignored: the
+    // parent's cost aggregation needs a session file per agent, so persistence
+    // is unconditional.
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: false }));
     createAgentSession.mockResolvedValue({ session: createSession("OK").session });
     await runAgent(ctx, "Explore", "go", { pi });
-    expect(sessionManagerInMemory).toHaveBeenCalled();
-    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
 
-    // ...and one that declares itself persistent still persists with it off.
-    sessionManagerInMemory.mockClear();
+    sessionManagerCreate.mockClear();
     setRememberAgents(false);
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
     createAgentSession.mockResolvedValue({ session: createSession("OK").session });
@@ -859,17 +861,16 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
   });
 
-  it("leaves a nested child in memory, since nothing can address it later", async () => {
-    // The default exists so `@handle` can reopen a conversation. A nested agent
-    // never gets a handle, so its transcript would be unreachable by anything —
-    // pure disk and /resume clutter.
+  it("persists a nested child, side of the parent's cost aggregation", async () => {
+    // A nested agent never gets a handle, but cost aggregation across the tree
+    // still needs its session file, so nested children persist too.
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
     createAgentSession.mockResolvedValue({ session: createSession("OK").session });
 
     await runAgent(ctx, "Explore", "go", { pi, nested: true });
 
-    expect(sessionManagerInMemory).toHaveBeenCalled();
-    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalled();
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
   });
 
   it("still persists a nested child that asks for it in frontmatter", async () => {

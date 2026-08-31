@@ -10,7 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -723,27 +723,52 @@ export default function (pi: ExtensionAPI) {
   // The review agent is NOT recursively gated: review IS the quality gate.
   // Review failures surface as feedback to the task agent; they never trigger
   // their own checks/review loop.
+  // A yield that lets pi's event loop drain: the 80ms widget spinner timer and
+  // keyboard input share the loop with this gate, so a tight async chain would
+  // still stall them. setImmediate fires after the current I/O callback, giving
+  // the timer and input their turn between gate stages.
+  const yieldToLoop = () => new Promise<void>((r) => setImmediate(r));
+
   const runGatedPackage = async (record: AgentRecord): Promise<void> => {
     const gate = record.gate;
     if (!gate?.resolve) return;
 
     const checksCwd = record.workingCwd ?? currentCtx?.cwd;
-    const runChecks = (): CheckOutcome[] => {
+    // Async child-process exec, not execSync: the synchronous variant blocks
+    // pi's single event-loop thread, which also drives the TUI renderer and
+    // keyboard input. Blocking it froze the widget spinner and locked the UI
+    // (typing unresponsive) for the whole duration of a check.
+    const runChecks = async (): Promise<CheckOutcome[]> => {
       const outcomes: CheckOutcome[] = [];
       for (const cmd of gate.checks) {
         try {
-          const stdout = execSync(cmd, {
-            cwd: checksCwd,
-            shell: "/bin/bash",
-            timeout: CHECK_TIMEOUT_MS,
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "pipe"],
-          }) as string;
+          const stdout = await new Promise<string>((resolve, reject) => {
+            exec(cmd, {
+              cwd: checksCwd,
+              shell: "/bin/bash",
+              timeout: CHECK_TIMEOUT_MS,
+              encoding: "utf8",
+              // Capture both; the error path needs stderr, the success path
+              // stdout. Unlike execSync's single result, `exec` gives both.
+            }, (error, so, se) => {
+              if (error) {
+                (error as any).stdout = so;
+                (error as any).stderr = se;
+                reject(error);
+              } else {
+                resolve(so);
+              }
+            });
+          });
           outcomes.push({ cmd, ok: true, output: truncateCheckOutput(stdout) });
         } catch (err) {
           const e = err as { stdout?: Buffer | string; stderr?: Buffer | string };
-          outcomes.push({ cmd, ok: false, output: truncateCheckOutput(`${e.stdout ?? ""}${e.stderr ?? ""}`) });
+          const output = truncateCheckOutput(`${e.stdout ?? ""}${e.stderr ?? ""}`);
+          outcomes.push({ cmd, ok: false, output });
           break; // sequential — stop at first failure
+        } finally {
+          // Let the loop drain after each check, not just between stages.
+          await yieldToLoop();
         }
       }
       return outcomes;
@@ -761,7 +786,8 @@ export default function (pi: ExtensionAPI) {
       outcomes.map((o) => `${o.ok ? "PASS" : "FAIL"} $ ${o.cmd}${!o.ok && o.output ? `\n${o.output}` : ""}`).join("\n"),
     ].join("\n");
 
-    const firstRun = runChecks();
+    const firstRun = await runChecks();
+    await yieldToLoop();
     const firstFail = firstRun.find((o) => !o.ok);
     const checkRuns: CheckOutcome[][] = [firstRun];
     let finalResult = record.result ?? "";
@@ -783,6 +809,8 @@ export default function (pi: ExtensionAPI) {
       } catch {
         // Review failed — fall through with no feedback; the caller sees the checks.
       }
+      // Let the loop breathe after the review's long foreground run.
+      await yieldToLoop();
     }
 
     // Feed review feedback back to the task agent once (maxReworks pass).
@@ -797,7 +825,7 @@ export default function (pi: ExtensionAPI) {
       if (resumed) {
         record.result = resumed.result ?? record.result;
         finalResult = record.result ?? "";
-        checkRuns.push(runChecks());
+        checkRuns.push(await runChecks());
       }
     }
 
