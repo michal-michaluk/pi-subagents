@@ -20,16 +20,17 @@ import subagentsExtension from "../src/index.js";
 
 function makePi() {
   const tools = new Map<string, any>();
+  const lifecycle = new Map<string, any>();
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
-    on: vi.fn(),
+    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools };
+  return { pi, tools, lifecycle };
 }
 
 function ctx() {
@@ -66,16 +67,19 @@ function spawn(tools: Map<string, any>, params: Record<string, unknown> = {}) {
 }
 
 async function runOnce(params: Record<string, unknown> = {}) {
-  const { pi, tools } = makePi();
+  const { pi, tools, lifecycle } = makePi();
   subagentsExtension(pi);
   settled();
-  return { out: textOf(await spawn(tools, params)) };
+  // session_start sets currentCtx, which runGatedPackage needs to spawn the review.
+  lifecycle.get("session_start")?.(null, ctx());
+  return { out: textOf(await spawn(tools, params)), tools, pi };
 }
 
 function fresh() {
-  const { pi, tools } = makePi();
+  const { pi, tools, lifecycle } = makePi();
   subagentsExtension(pi);
   settled();
+  lifecycle.get("session_start")?.(null, ctx());
   return tools;
 }
 
@@ -102,5 +106,16 @@ describe("gated tool wiring", () => {
   it("starts a gated background run when checks are given without name", async () => {
     const { out } = await runOnce({ checks: ["true"] });
     expect(out).toContain("Agent ID:");
+  });
+
+  it("spawns the review agent as the dedicated Review type, not a general twin", async () => {
+    await runOnce({ checks: ["true"], run_in_background: false });
+    // The gate runs checks then spawns the review via runAgent(ctx, "Review", reviewPrompt, ...).
+    const reviewCalls = vi.mocked(runAgent).mock.calls.filter(
+      ([, type]) => type === "Review",
+    );
+    expect(reviewCalls.length).toBeGreaterThan(0);
+    // The review prompt carries the checks results (the review sees them).
+    expect(String(reviewCalls[0][2])).toMatch(/Review|CHECKS|checks/i);
   });
 });

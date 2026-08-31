@@ -107,9 +107,13 @@ describe("toolDescriptionMode", () => {
     // Type list keeps every agent but only the first sentence of each description.
     expect(desc).toContain("- general-purpose:");
     expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
+    expect(desc).toContain("- Review: Independent quality-gate reviewer");
     expect(desc).not.toContain("very thorough");
     // The point of the feature: materially smaller than the full version.
-    expect(desc.length).toBeLessThan(1600);
+    // 4 default agents now populate the one-line type list; 1700 keeps the
+    // threshold just above the current list length (a 5th agent would need a
+    // bump).
+    expect(desc.length).toBeLessThan(1700);
   });
 
   it("invalid mode in the settings file is dropped — full description", () => {

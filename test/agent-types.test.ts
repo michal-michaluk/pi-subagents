@@ -78,6 +78,7 @@ describe("agent type registry", () => {
       expect(resolveType("Explore")).toBe("Explore");
       expect(resolveType("explore")).toBe("Explore");
       expect(resolveType("GENERAL-PURPOSE")).toBe("general-purpose");
+      expect(resolveType("Review")).toBe("Review");
       expect(resolveType("nonexistent")).toBeUndefined();
     });
 
@@ -99,6 +100,14 @@ describe("agent type registry", () => {
     it("Explore has haiku model in config", () => {
       const cfg = getAgentConfig("Explore");
       expect(cfg?.model).toBe("anthropic/claude-haiku-4-5");
+    });
+
+    it("Review resolves to itself with read-only tools and no file-edit tools", () => {
+      const cfg = getConfig("Review");
+      expect(cfg.displayName).toBe("Review");
+      expect(cfg.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
+      expect(cfg.builtinToolNames).not.toContain("edit");
+      expect(cfg.builtinToolNames).not.toContain("write");
     });
 
     it("default agents are marked isDefault", () => {

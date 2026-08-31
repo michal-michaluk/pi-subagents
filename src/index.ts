@@ -795,11 +795,13 @@ export default function (pi: ExtensionAPI) {
 
     // Review ALWAYS runs (checks PASS or FAIL) — an independent quality layer
     // in a fresh context, spawned AT the working cwd so it inspects real files.
+    // Uses the dedicated `Review` default agent (read-only, no edits) so it
+    // shows as a distinct `review` subagent, not a `general` twin.
     const ctx = currentCtx;
     if (ctx) {
       const reviewPrompt = buildReviewPrompt(finalResult, firstRun);
       try {
-        const review = await manager.spawnAndWait(pi, ctx, "general", reviewPrompt, {
+        const review = await manager.spawnAndWait(pi, ctx, "Review", reviewPrompt, {
           description: `review: ${record.description ?? record.type}`,
           cwd: checksCwd,
           model: ctx.model,

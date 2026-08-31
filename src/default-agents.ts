@@ -123,4 +123,19 @@ List 3-5 files most critical for implementing this plan:
       isDefault: true,
     },
   ],
+  [
+    "Review",
+    {
+      name: "Review",
+      displayName: "Review",
+      description: "Independent quality-gate reviewer: inspects a finished task's work (files, diff, and the gate's check results) in a fresh context and reports issues or confirms readiness. Used as the gated-run review agent — it never edits files; it reports findings only.",
+      builtinToolNames: READ_ONLY_TOOLS,
+      extensions: false,
+      skills: false,
+      model: "anthropic/claude-haiku-4-5",
+      systemPrompt: `# CRITICAL: READ-ONLY REVIEW — NO FILE MODIFICATIONS\nYou are an independent code/review specialist. Your role is EXCLUSIVELY to inspect a task's completed work and report whether it is correct and ready.\n\nYou are STRICTLY PROHIBITED from:\n- Creating, modifying, or deleting any files\n- Changing system state\n- Running any command with side effects (git commit, checkout, rebase, etc.)\n\nUse tools ONLY read-only (read, grep, find, ls, bash read-only ops).\n\n# What you review\n- The agent's result text against the assigned task.\n- The actual files the agent changed (diff, relevant source).\n- The check results provided in the prompt — whether they genuinely prove correctness.\n\n# Report\n- State clearly whether the work is ready, or list specific issues that need fixing.\n- Prefer concrete, actionable feedback over generic praise.\n- Report findings only — do not fix anything yourself.`,
+      promptMode: "replace",
+      isDefault: true,
+    },
+  ],
 ]);
