@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
+import { orderAgentsByReview } from "../src/ui/order-agents.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -141,6 +142,70 @@ describe("AgentWidget", () => {
   it("renders nothing in 'off' mode", () => {
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     expect(renderLines(manager, "background", () => "off")).toBe("");
+  });
+
+  // A gated-run `Review` agent is spawned after its task settles, so its
+  // `startedAt` is newer than the task's — put `listAgents()` raw, it would
+  // sort to the TOP of the newest-first widget. The `reviewOf` link must pull
+  // it back down to sit immediately AFTER the task it reviewed, not above it.
+  it("places a review agent immediately after the task it reviewed", () => {
+    const task = {
+      ...makeRecord("task", { isBackground: true }),
+      id: "task",
+      description: "task description",
+      startedAt: 100,
+    };
+    const review = {
+      ...makeRecord("review", { isBackground: true }),
+      id: "review",
+      type: "Review",
+      description: "review: task description",
+      startedAt: 200, // newer than the task — would otherwise sort above it
+      reviewOf: "task",
+    };
+    const other = {
+      ...makeRecord("other", { isBackground: true }),
+      id: "other",
+      description: "other description",
+      startedAt: 300,
+    };
+    // Realistic base order: `listAgents()` is newest-first, so the unrelated
+    // `other` (startedAt 300) comes first, then the review (200), then the task (100).
+    const manager = { listAgents: () => [other, review, task] };
+    const lines = renderLines(manager, "task", () => "all").split("\n");
+
+    const taskIdx = lines.findIndex(l => l.includes("task description"));
+    const reviewIdx = lines.findIndex(l => l.includes("review: task description"));
+    const otherIdx = lines.findIndex(l => l.includes("other description"));
+
+    // Review appears below its task (not at the top, as pure newest-first would).
+    expect(taskIdx).toBeGreaterThan(-1);
+    expect(reviewIdx).toBeGreaterThan(taskIdx);
+    // The unrelated newest agent stays above the task/review pair.
+    expect(otherIdx).toBeLessThan(taskIdx);
+  });
+});
+
+describe("orderAgentsByReview", () => {
+  it("groups a review record immediately after the task it reviews (stable)", () => {
+    const task = { id: "task", reviewOf: undefined, startedAt: 100 };
+    const review = { id: "review", reviewOf: "task", startedAt: 200 };
+    const other = { id: "other", reviewOf: undefined, startedAt: 300 };
+    // listAgents() is newest-first: [other, review, task].
+    const result = orderAgentsByReview([other, review, task]);
+    expect(result.map(r => r.id)).toEqual(["other", "task", "review"]);
+  });
+
+  it("keeps records without a reviewOf link in their relative order", () => {
+    const a = { id: "a", reviewOf: undefined, startedAt: 100 };
+    const b = { id: "b", reviewOf: undefined, startedAt: 200 };
+    expect(orderAgentsByReview([b, a]).map(r => r.id)).toEqual(["b", "a"]);
+  });
+
+  it("appends a review whose task was evicted (no matching task record)", () => {
+    const review = { id: "review", reviewOf: "gone", startedAt: 200 };
+    const other = { id: "other", reviewOf: undefined, startedAt: 300 };
+    expect(orderAgentsByReview([review, other]).map(r => r.id)).toEqual(["other", "review"]);
   });
 });
 

@@ -251,6 +251,13 @@ export interface AgentRecord {
    * directory as their ancestors' instead of the child session's own id.
    */
   rootSessionId?: string;
+  /**
+   * When this agent is a gated-run `Review` agent, the id of the task agent it
+   * reviewed. Set by `runGatedPackage` on the review record so the views can
+   * place the review immediately after the task it reviewed instead of purely
+   * by start time. Undefined for every other agent.
+   */
+  reviewOf?: string;
 }
 
 export interface AgentInvocation {

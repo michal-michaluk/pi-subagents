@@ -807,6 +807,9 @@ export default function (pi: ExtensionAPI) {
           model: ctx.model,
           signal: record.abortController?.signal,
         });
+        // Link the review to the task it reviewed so the views can place it
+        // immediately after that task instead of purely by start time.
+        review.record.reviewOf = record.id;
         reviewFeedback = review.record.result?.trim();
       } catch {
         // Review failed — fall through with no feedback; the caller sees the checks.

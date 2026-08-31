@@ -11,6 +11,7 @@ import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
+import { orderAgentsByReview } from "./order-agents.js";
 
 // ---- Constants ----
 
@@ -286,8 +287,8 @@ export class AgentWidget {
     const all = this.manager.listAgents().filter(a => !a.parentAgentId);
     switch (this.mode()) {
       case "off": return [];
-      case "background": return all.filter(a => a.isBackground !== false);
-      default: return all;
+      case "background": return orderAgentsByReview(all.filter(a => a.isBackground !== false));
+      default: return orderAgentsByReview(all);
     }
   }
 

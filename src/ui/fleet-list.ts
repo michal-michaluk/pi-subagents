@@ -18,6 +18,7 @@ import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { orderAgentsByReview } from "./order-agents.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -194,13 +195,13 @@ export class FleetList {
    */
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
-    return this.manager.listAgents()
+    return orderAgentsByReview(this.manager.listAgents()
       .filter(a => !a.parentAgentId && a.session && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       ))
-      .sort((a, b) => a.startedAt - b.startedAt);
+      .sort((a, b) => a.startedAt - b.startedAt));
   }
 
   private roster(): FleetEntry[] {
