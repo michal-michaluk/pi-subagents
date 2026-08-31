@@ -9,6 +9,32 @@
  * call the real `Agent` tool, assert on the tool result.
  */
 import { describe, expect, it, vi } from "vitest";
+import { setDefaultsDisabled, setFallbackSubagent } from "../src/agent-types.js";
+import type { AgentConfig } from "../src/types.js";
+
+// Deterministic agent roster: the extension calls loadCustomAgents on every
+// spawn, so control what it returns instead of reading the environment's real
+// agent dirs (defaults-disabled global config).
+const userAgents = new Map<string, AgentConfig>();
+vi.mock("../src/custom-agents.js", async () => ({
+  loadCustomAgents: vi.fn(() => userAgents),
+}));
+
+function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
+  return {
+    name: "test-agent",
+    description: "Test agent",
+    builtinToolNames: ["read", "grep"],
+    extensions: false,
+    skills: false,
+    systemPrompt: "You are a test agent.",
+    promptMode: "replace",
+    inheritContext: false,
+    runInBackground: false,
+    isolated: false,
+    ...overrides,
+  };
+}
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -70,6 +96,10 @@ async function runOnce(params: Record<string, unknown> = {}) {
   const { pi, tools, lifecycle } = makePi();
   subagentsExtension(pi);
   settled();
+  // Deterministic registry regardless of the machine: force defaults off and no
+  // fallbackSubagent so only the mocked userAgents roster drives resolution.
+  setDefaultsDisabled(true);
+  setFallbackSubagent(undefined);
   // session_start sets currentCtx, which runGatedPackage needs to spawn the review.
   lifecycle.get("session_start")?.(null, ctx());
   return { out: textOf(await spawn(tools, params)), tools, pi };
@@ -118,14 +148,29 @@ describe("gated tool wiring", () => {
     expect(out).toContain("Agent ID:");
   });
 
-  it("spawns the review agent as the dedicated Review type, not a general twin", async () => {
+  it("spawns the review agent as the dedicated review type, not a general twin", async () => {
+    // A user `review` agent exists → resolves to it, not a `general` twin.
+    userAgents.set("review", makeAgentConfig({ name: "review" }));
     await runOnce({ checks: ["true"], run_in_background: false });
-    // The gate runs checks then spawns the review via runAgent(ctx, "Review", reviewPrompt, ...).
+    // The gate runs checks then spawns the review via runAgent(ctx, type, reviewPrompt, ...).
     const reviewCalls = vi.mocked(runAgent).mock.calls.filter(
-      ([, type]) => type === "Review",
+      ([, type]) => type === "review" || type === "Review",
     );
     expect(reviewCalls.length).toBeGreaterThan(0);
     // The review prompt carries the checks results (the review sees them).
-    expect(String(reviewCalls[0][2])).toMatch(/Review|CHECKS|checks/i);
+    expect(String(reviewCalls[0][2])).toMatch(/CHECKS|checks/i);
+  });
+
+  it("falls back the review dispatch to the general twin when no review agent exists", async () => {
+    // No `review`/`Review` agent, no fallbackSubagent → the review must still
+    // dispatch (never error) to the general-purpose twin.
+    userAgents.clear();
+    await runOnce({ checks: ["true"], run_in_background: false });
+    const reviewCalls = vi.mocked(runAgent).mock.calls.filter(
+      ([, type]) => type === "general-purpose",
+    );
+    // The task spawn is gated as general-purpose too; the review twin adds a
+    // second general-purpose spawn. Assert it happened (no error, not hung).
+    expect(reviewCalls.length).toBeGreaterThan(1);
   });
 });

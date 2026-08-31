@@ -21,7 +21,7 @@ import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveReviewAgentType, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -795,13 +795,17 @@ export default function (pi: ExtensionAPI) {
 
     // Review ALWAYS runs (checks PASS or FAIL) — an independent quality layer
     // in a fresh context, spawned AT the working cwd so it inspects real files.
-    // Uses the dedicated `Review` default agent (read-only, no edits) so it
-    // shows as a distinct `review` subagent, not a `general` twin.
+    // The dispatch type is resolved dynamically so it shows as a dedicated
+    // `review` subagent (a user-defined lowercase `review`, or the default
+    // `Review`) rather than a `general` twin; falling back to fallbackSubagent
+    // or the general-purpose twin when no review agent is registered (#183).
+    // The resolved type drives BOTH the spawn and the display name/label.
+    const reviewType = resolveReviewAgentType();
     const ctx = currentCtx;
     if (ctx) {
       const reviewPrompt = buildReviewPrompt(finalResult, firstRun);
       try {
-        const review = await manager.spawnAndWait(pi, ctx, "Review", reviewPrompt, {
+        const review = await manager.spawnAndWait(pi, ctx, reviewType, reviewPrompt, {
           description: `review: ${record.description ?? record.type}`,
           cwd: checksCwd,
           model: ctx.model,

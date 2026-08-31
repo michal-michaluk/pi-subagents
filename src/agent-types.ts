@@ -292,6 +292,29 @@ export function getToolNamesForType(type: string): string[] {
   return config?.builtinToolNames ?? [...BUILTIN_TOOL_NAMES];
 }
 
+/**
+ * Resolve the agent type for a gated-run review dispatch.
+ *
+ * The review must always resolve to a spawnable, sensible type — it never
+ * errors. Priority order:
+ *   1. an enabled agent literally named `review`/`Review` (case-insensitive) —
+ *      the dedicated read-only reviewer (a default `Review`, or a user-defined
+ *      lowercase `review` when defaults are disabled);
+ *   2. the configured `fallbackSubagent`, if set, non-empty, and not "none";
+ *   3. `general-purpose` — the default agent / twin of the main agent (which
+ *      `getConfig`/`getToolNamesForType` fall back to even when it is not
+ *      registered, e.g. under disableDefaultAgents).
+ */
+export function resolveReviewAgentType(): string {
+  const review = getAvailableTypes().find((t) => t.toLowerCase() === "review");
+  if (review) return review;
+  const configured = getFallbackSubagent();
+  if (configured?.trim() && configured.trim().toLowerCase() !== NO_FALLBACK) {
+    return configured.trim();
+  }
+  return "general-purpose";
+}
+
 /** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to general-purpose. */
 export function getConfig(type: string): {
   displayName: string;

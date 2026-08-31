@@ -14,6 +14,7 @@ import {
   NO_FALLBACK,
   registerAgents,
   resolveEnabledTypeIn,
+  resolveReviewAgentType,
   resolveSpawnType,
   resolveSpawnTypeIn,
   resolveType,
@@ -498,5 +499,58 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
     expect(resolveSpawnTypeIn(registry, "typoo")).toEqual({
       ok: true, type: "router", fellBackFrom: "typoo",
     });
+  });
+});
+
+describe("resolveReviewAgentType — gated-run review dispatch (#183)", () => {
+  afterEach(() => {
+    setFallbackSubagent(undefined);
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+  });
+
+  it("prefers an enabled `review` agent (canonical key) when one exists", () => {
+    // Defaults off so the built-in `Review` does not mask the user agent.
+    setDefaultsDisabled(true);
+    registerAgents(new Map([["review", makeAgentConfig({ name: "review" })]]));
+    expect(resolveReviewAgentType()).toBe("review");
+  });
+
+  it("resolves a case-variant `Review` default agent (case-insensitive)", () => {
+    // Defaults on: the built-in `Review` agent is registered and enabled.
+    registerAgents(new Map());
+    expect(resolveReviewAgentType()).toBe("Review");
+  });
+
+  it("falls back to the configured fallbackSubagent when no review agent exists", () => {
+    setDefaultsDisabled(true);
+    registerAgents(new Map([["auditor", makeAgentConfig({ name: "auditor" })]]));
+    setFallbackSubagent("auditor");
+    expect(resolveReviewAgentType()).toBe("auditor");
+  });
+
+  it("ignores a fallbackSubagent set to `none` and uses the default twin", () => {
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    setFallbackSubagent(NO_FALLBACK);
+    expect(resolveReviewAgentType()).toBe("general-purpose");
+  });
+
+  it("falls back to the general-purpose twin when no review agent and no fallback is set", () => {
+    // disableDefaultAgents: the built-in `Review` is NOT registered. The review
+    // must still dispatch to a sensible type (the general twin) rather than error.
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    expect(resolveReviewAgentType()).toBe("general-purpose");
+  });
+
+  it("prefers the review agent over the configured fallbackSubagent", () => {
+    setDefaultsDisabled(true);
+    registerAgents(new Map([
+      ["review", makeAgentConfig({ name: "review" })],
+      ["auditor", makeAgentConfig({ name: "auditor" })],
+    ]));
+    setFallbackSubagent("auditor");
+    expect(resolveReviewAgentType()).toBe("review");
   });
 });
