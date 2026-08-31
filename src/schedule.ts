@@ -44,6 +44,10 @@ export interface NewJobInput {
   max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
+  /** Gated run: checks run at fire time in the agent's working cwd (see the Agent tool's `checks`). */
+  checks?: string[];
+  /** Scope for the review agent in a gated run (see the Agent tool's `review_prompt`). */
+  reviewPrompt?: string;
 }
 
 export class SubagentScheduler {
@@ -107,6 +111,8 @@ export class SubagentScheduler {
       max_turns: input.max_turns,
       isolated: input.isolated,
       isolation: input.isolation,
+      checks: input.checks,
+      reviewPrompt: input.reviewPrompt,
       enabled: true,
       createdAt: new Date().toISOString(),
       runCount: 0,
@@ -256,6 +262,13 @@ export class SubagentScheduler {
         isolated: job.isolated,
         thinkingLevel: job.thinking,
         isolation: job.isolation,
+        // A gated scheduled job fires a normal gated background spawn: the
+        // package (checks → review → rework) settles before the deferred
+        // onComplete fires, and `record.promise` is the package promise, so
+        // the success/error accounting below updates after the package.
+        gate: job.checks?.length
+          ? { checks: job.checks, reviewPrompt: job.reviewPrompt, maxReworks: 1 }
+          : undefined,
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);

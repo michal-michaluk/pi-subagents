@@ -178,3 +178,105 @@ describe("gatedRework uses foreground resume which does NOT re-finalize", () => 
     expect(onComplete).not.toHaveBeenCalled();
   });
 });
+
+describe("gated background resume keeps the package promise (F4)", () => {
+  let manager: AgentManager;
+  const onComplete = vi.fn();
+
+  beforeEach(() => {
+    onComplete.mockClear();
+    manager = new AgentManager(onComplete);
+    manager.gateRunner = vi.fn().mockResolvedValue(undefined);
+  });
+  afterEach(() => manager?.dispose());
+
+  /** Spawn a settled (non-gated) background agent, so it holds a resumable session. */
+  async function spawnSettled() {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first run",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    } as any);
+    // Explicitly `gate: undefined` — gatedSpawn's default carries a gate, but
+    // these resumes must start from a NON-gated record (the F4 scenario).
+    const id = gatedSpawn(manager, { gate: undefined });
+    const record = manager.getRecord(id)!;
+    record.session = mockSession();
+    await new Promise((r) => setTimeout(r, 10));
+    // The initial non-gated spawn's settle fires onComplete once; drop it so the
+    // assertions below count only the gated finalize.
+    onComplete.mockClear();
+    return { id, record };
+  }
+
+  it("substitutes the package promise for record.promise and holds the record in flight until finalizeGated", async () => {
+    const { id, record } = await spawnSettled();
+    const taskPromise = record.promise;
+
+    // Background resume WITH checks — a gated package.
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed run", failure: undefined });
+    manager.resume(id, "continue with checks", undefined, {
+      isBackground: true,
+      gate: { checks: ["true"], maxReworks: 1 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The resumed turn settled; the package hasn't. record.promise must now be
+    // the PACKAGE promise (not the task promise) so a waiter stays blocked, and
+    // the record must read in-flight.
+    expect(record.status).toBe("running");
+    expect(record.gate).toBeDefined();
+    expect(record.gate!.checks).toEqual(["true"]);
+    expect(record.gate!.reworksUsed).toBe(0);
+    expect(record.promise).not.toBe(taskPromise);
+    // Give the gate runner a turn; it resolves the package promise.
+    record.result = "final package";
+    manager.finalizeGated(record);
+    await expect(record.promise).resolves.toBe("final package");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the rework loop on a gated background resume, then finalizes", async () => {
+    const { id, record } = await spawnSettled();
+
+    // Simulate the real gate runner: phase 1 resume → rework feedback → phase 2.
+    const gateRunner = vi.fn(async (r: any) => {
+      const gate = r.gate;
+      // First pass feedback.
+      gate.reworksUsed++;
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "reworked", failure: undefined });
+      const reworked = await manager.resume(r.id, "apply feedback", undefined, {});
+      expect(reworked).toBeTruthy();
+      r.result = reworked!.result ?? r.result;
+      manager.finalizeGated(r);
+    });
+    manager.gateRunner = gateRunner;
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed run", failure: undefined });
+    manager.resume(id, "continue with checks", undefined, {
+      isBackground: true,
+      gate: { checks: ["true"], maxReworks: 1 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The package settles via the gate runner → finalizeGated fires onComplete once.
+    expect(gateRunner).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(record.status).toBe("completed");
+  });
+
+  it("finalizes immediately (not gated) when the resumed turn fails", async () => {
+    const { id, record } = await spawnSettled();
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "", failure: "provider error" });
+
+    await manager.resume(id, "continue", undefined, {
+      isBackground: true,
+      gate: { checks: ["true"], maxReworks: 1 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(record.status).toBe("error");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});

@@ -75,14 +75,6 @@ async function runOnce(params: Record<string, unknown> = {}) {
   return { out: textOf(await spawn(tools, params)), tools, pi };
 }
 
-function fresh() {
-  const { pi, tools, lifecycle } = makePi();
-  subagentsExtension(pi);
-  settled();
-  lifecycle.get("session_start")?.(null, ctx());
-  return tools;
-}
-
 describe("gated tool wiring", () => {
   it("accepts checks with run_in_background: true — no longer refuses it", async () => {
     const { out } = await runOnce({ checks: ["true"], run_in_background: true });
@@ -91,16 +83,34 @@ describe("gated tool wiring", () => {
     expect(out).not.toContain("Cannot combine `checks`");
   });
 
-  it("still refuses checks with resume (v1 follow-up)", async () => {
-    const tools = fresh();
-    const out = textOf(await spawn(tools, { checks: ["true"], resume: "nope" }));
-    expect(out).toMatch(/Cannot combine `checks` with `schedule` or `resume`/);
-  });
+  it("accepts checks with resume — no longer refuses it (gated package on the resumed turn)", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    lifecycle.get("session_start")?.(null, ctx());
+    // Spawn a settled background agent so it holds a resumable session.
+    const session = { dispose: vi.fn(), messages: [], prompt: vi.fn(), subscribe: vi.fn() } as any;
+    vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, options: any) => {
+      await Promise.resolve();
+      options.onSessionCreated?.(session);
+      return { responseText: "first run", session, aborted: false, steered: false } as any;
+    });
+    const spawned = await spawn(tools, { prompt: "first", description: "first", run_in_background: true });
+    const id = /Agent ID: (\S+)/.exec(textOf(spawned))![1];
+    await new Promise((r) => setTimeout(r, 0));
 
-  it("still refuses checks with schedule (v1 follow-up)", async () => {
-    const tools = fresh();
-    const out = textOf(await spawn(tools, { checks: ["true"], schedule: "10m" }));
-    expect(out).toMatch(/Cannot combine `checks` with `schedule` or `resume`/);
+    // Resume WITH checks: must now be accepted (no refusal), and the resumed
+    // turn is gated — so the run returns a background handoff, not the result.
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "resumed",
+      session,
+      aborted: false,
+      steered: false,
+    } as any);
+    const out = textOf(await spawn(tools, { checks: ["true"], resume: id, run_in_background: true }));
+    expect(out).toContain("resumed in background");
+    expect(out).not.toContain("Cannot combine`checks`");
+
+    await lifecycle.get("session_shutdown")?.(null, ctx());
   });
 
   it("starts a gated background run when checks are given without name", async () => {

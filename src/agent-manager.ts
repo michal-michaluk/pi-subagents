@@ -189,6 +189,18 @@ interface ResumeOptions {
    * record — the historical behavior.
    */
   isBackground?: boolean;
+  /**
+   * Gated resume: the resumed turn is not done at settle — the gate runner
+   * (checks → review → optional rework) runs first, and finalization is
+   * deferred to package settle, exactly like a gated spawn. The record's
+   * `promise` is the PACKAGE promise while gated (set here), so a waiter
+   * unblocks at package end, not the resumed turn's end. `baseCwd`/`customCwd`
+   * for the deferred worktree cleanup are inherited from a prior gated spawn's
+   * record.gate; a worktree record that was spawned WITHOUT a gate has no such
+   * state, so index.ts refuses `checks` + `resume` for it.
+   */
+  gate?: { checks: string[]; reviewPrompt?: string; maxReworks?: number };
+
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called once per assistant message_end with that message's usage delta. */
@@ -864,7 +876,50 @@ export class AgentManager {
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
 
+    // Gated foreground resume: the resumed turn settled, but the package
+    // (checks → review → rework) has not. Hand off to the gate runner, which
+    // owns the loop and calls `finalizeGated` at package settle. A resumed turn
+    // that failed or was aborted has nothing worth gating — finalize now. When
+    // the record has a package promise (set below), await it so a foreground
+    // caller blocks for the whole package, not just the resumed turn.
+    if (options?.gate) {
+      this.prepareGatedResume(record, options.gate);
+      if (record.status === "completed" && this.gateRunner) {
+        record.status = "running";
+        record.completedAt = undefined;
+        void this.gateRunner(record).catch(() => this.finalizeGated(record));
+        if (record.promise) await record.promise;
+      } else {
+        this.finalizeGated(record);
+      }
+    }
+
     return record;
+  }
+
+  /**
+   * Build a fresh package promise + gate state for a gated RESUME, mirroring
+   * `startAgent`. The package promise substitutes `record.promise` so a waiter
+   * unblocks at package settle, not the resumed turn's end.
+   * `baseCwd`/`customCwd` for the deferred worktree cleanup are inherited from a
+   * prior gated spawn's `record.gate` if one exists; undefined for a worktree
+   * record that was spawned WITHOUT a gate — index.ts refuses `checks` + `resume`
+   * for that combination (see the worktree edge case).
+   */
+  private prepareGatedResume(record: AgentRecord, gate: { checks: string[]; reviewPrompt?: string; maxReworks?: number }): void {
+    let resolvePkg!: (text: string) => void;
+    const pkgPromise = new Promise<string>((resolve) => { resolvePkg = resolve; });
+    record.promise = pkgPromise;
+    record.gate = {
+      checks: gate.checks,
+      reviewPrompt: gate.reviewPrompt,
+      maxReworks: gate.maxReworks ?? 1,
+      reworksUsed: 0,
+      resolve: resolvePkg,
+      baseCwd: record.gate?.baseCwd,
+      customCwd: record.gate?.customCwd,
+      description: record.description,
+    };
   }
 
   /**
@@ -883,10 +938,26 @@ export class AgentManager {
   ) {
     if (!record.session) return;
 
+    // Whether THIS resumed turn is gated. Keyed off `options.gate`, not
+    // `record.gate`: a record carries a stale (already-settled) `gate` from a
+    // prior gated spawn, which a non-gated re-resume must not mistake for an
+    // in-flight package.
+    const gated = !!options.gate;
+
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
     this.onStart?.(record);
+
+    // Gated resume: build a fresh package promise + gate state, mirroring
+    // `startAgent`. The package promise substitutes `record.promise` so a
+    // waiter unblocks at package settle, and `settle` hands off to the gate
+    // runner (which finalizes) instead of finalizing straight away. `baseCwd`/
+    // `customCwd` are inherited from a prior gated spawn if one exists (see
+    // `prepareGatedResume`).
+    if (options.gate) {
+      this.prepareGatedResume(record, options.gate);
+    }
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
     // than the previous one's settled controller.
@@ -917,6 +988,25 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
+
+      // ---- GATED RESUME: task settled, package not. ----
+      // Keep the record in flight (status stays "running"), do NOT fire
+      // onComplete or drainQueue, and hand off to the gate runner, which owns
+      // the checks → review → rework loop and calls `finalizeGated` (the single
+      // deferred-finalize point) at package settle. A resumed turn that failed
+      // or was aborted has nothing worth gating — finalize immediately. Same
+      // contract as `startAgent`'s gated branch.
+      if (gated) {
+        if (record.status === "completed" && this.gateRunner) {
+          record.status = "running";
+          record.completedAt = undefined;
+          void this.gateRunner(record).catch(() => this.finalizeGated(record));
+        } else {
+          this.finalizeGated(record);
+        }
+        return;
+      }
+
       if (occupiesPoolSlot(record)) this.runningBackground--;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
@@ -962,7 +1052,12 @@ export class AgentManager {
         return "";
       });
 
-    record.promise = promise;
+    // For a gated resume the package promise was set above (resolves at package
+    // settle); the task promise must NOT overwrite it, or a waiter would
+    // unblock at the resumed turn's end instead of the package's end.
+    if (!gated) {
+      record.promise = promise;
+    }
   }
 
   /**

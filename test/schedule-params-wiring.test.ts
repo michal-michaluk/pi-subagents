@@ -121,6 +121,23 @@ describe("Agent tool → persisted scheduled job", () => {
       restore();
     }
   });
+
+  it("persists checks + review_prompt on a gated scheduled job (previously refused)", async () => {
+    const { job, reply, restore } = await scheduleAndReadBack({
+      subagent_type: "general-purpose",
+      checks: ["true"],
+      review_prompt: "check the diff",
+    });
+    try {
+      expect(job.checks).toEqual(["true"]);
+      expect(job.reviewPrompt).toBe("check the diff");
+      // No longer the v1 refusal — the job is scheduled with the gate carried.
+      expect(reply).toContain("Scheduled");
+      expect(reply).not.toContain("Cannot combine`checks`");
+    } finally {
+      restore();
+    }
+  });
 });
 
 // README documents three combinations that scheduling refuses. Each is a

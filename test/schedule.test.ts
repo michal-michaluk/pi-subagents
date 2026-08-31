@@ -325,6 +325,42 @@ describe("SubagentScheduler — fire path", () => {
     expect(optsArg.isBackground).toBe(true);
   });
 
+  it("gated job spawns with gate: checks and updates after the package settles", async () => {
+    // The package promise is what the scheduler keys success/error off — it
+    // must resolve only at package settle, not at the task it wraps.
+    const records = new Map<string, { status: string; promise: Promise<string>; resolve: () => void }>();
+    manager.spawn.mockImplementation(() => {
+      const id = "agent-" + Math.random().toString(36).slice(2, 10);
+      let resolve!: () => void;
+      const promise = new Promise<string>(r => { resolve = () => r(""); });
+      records.set(id, { status: "running", promise, resolve });
+      return id;
+    });
+    manager.getRecord.mockImplementation((id: string) => records.get(id));
+
+    const job = scheduler.addJob({
+      name: "gated-now", description: "gated", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "x",
+      checks: ["true"], reviewPrompt: "review scope",
+    });
+
+    vi.advanceTimersByTime(2_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    // The fired spawn must carry the gate (checks + reviewPrompt, maxReworks 1).
+    const optsArg = manager.spawn.mock.calls[0][4];
+    expect(optsArg.gate).toEqual({ checks: ["true"], reviewPrompt: "review scope", maxReworks: 1 });
+
+    // Before the package settles, lastStatus is still "running".
+    const r = [...records.values()][0];
+    r.status = "completed";
+    // The package promise resolves (finalizeGated) → scheduler finalizes.
+    r.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("success");
+  });
+
+
   it("disabled jobs do not fire", () => {
     const job = scheduler.addJob({
       name: "off", description: "x", schedule: "1s",

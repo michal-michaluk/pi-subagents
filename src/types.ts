@@ -318,6 +318,14 @@ export interface ScheduledSubagent {
   max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
+  /**
+   * Gated run: deterministic bash commands gating completion, run at fire time
+   * in the agent's working cwd before finalize (checks → review → rework).
+   * Optional — absent runs the job as a plain background spawn.
+   */
+  checks?: string[];
+  /** Scope for the review agent in a gated run (see the Agent tool's `review_prompt`). */
+  reviewPrompt?: string;
 
   // state
   enabled: boolean;

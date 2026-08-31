@@ -1311,7 +1311,7 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     existing: AgentRecord,
     prompt: string,
-    opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
+    opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string; gate?: { checks: string[]; reviewPrompt?: string; maxReworks?: number } },
   ): Promise<AgentRecord | undefined> {
     const id = existing.id;
     const joinMode = resolveJoinMode(defaultJoinMode, true);
@@ -1344,6 +1344,7 @@ export default function (pi: ExtensionAPI) {
     // run_in_background in that same turn keep going.
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
+      gate: opts.gate,
       onToolActivity: bgCallbacks.onToolActivity,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
       // Fires when the run actually starts — immediately, or on queue
@@ -1925,11 +1926,8 @@ Terse command-style prompts produce shallow, generic work.
       // `gate` rides the spawn options; the manager defers finalization until
       // the whole package settles (see `runGatedPackage`). Valid with
       // run_in_background (deferred notification), worktree (copy stays alive),
-      // and resume. Only `schedule` is still unsupported in v1 — the scheduler
-      // fire path doesn't thread `gate` yet (follow-up).
-      if (params.checks?.length && (params.schedule || params.resume)) {
-        return textResult("Cannot combine `checks` with `schedule` or `resume` in this version — gated resume/schedule are a follow-up.");
-      }
+      // resume (package promise + gated settle, see startResume), and schedule
+      // (the scheduler threads `gate` into its fired spawn, see executeJob).
       const gateParams = params.checks?.length
         ? { checks: params.checks as string[], reviewPrompt: params.review_prompt as string | undefined, maxReworks: 1 }
         : undefined;
@@ -1965,6 +1963,8 @@ Terse command-style prompts produce shallow, generic work.
             max_turns: effectiveMaxTurns,
             isolated: isolated,
             isolation: isolation,
+            checks: gateParams?.checks,
+            reviewPrompt: gateParams?.reviewPrompt,
           });
           const next = scheduler.getNextRun(job.id);
           return textResult(
@@ -1985,6 +1985,18 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
+        }
+        // Worktree edge case (F4): a worktree agent spawned WITHOUT a gate has no
+        // spawn-time `baseCwd`/`customCwd` to reuse for the deferred worktree
+        // cleanup at package settle (`finalizeGated`). That repro state is only
+        // captured inside `record.gate` at spawn. Resuming it with checks would
+        // leak the worktree copy, so refuse the combination instead of leaving a
+        // silent leak.
+        if (gateParams && existing.worktree && !existing.gate) {
+          return textResult(
+            "Cannot combine `checks` with resuming a worktree agent that was spawned without `checks` — " +
+            "the worktree cleanup state is only captured for gated spawns.",
+          );
         }
 
         // Background resume: detached run that notifies on completion, mirroring
@@ -2009,6 +2021,7 @@ Terse command-style prompts produce shallow, generic work.
             outputTranscript,
             maxTurns: effectiveMaxTurns,
             toolCallId,
+            gate: gateParams,
           });
           if (!record) {
             return textResult(`Failed to resume agent "${params.resume}".`);
@@ -2027,7 +2040,7 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        const record = await manager.resume(params.resume, params.prompt, signal, { gate: gateParams });
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
