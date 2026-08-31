@@ -1682,14 +1682,14 @@ Terse command-style prompts produce shallow, generic work.
         Type.Array(
           Type.String({
             description:
-              "Deterministic bash commands gating this agent's completion — run sequentially in the agent's working cwd (worktree override > caller cwd > parent cwd), stop at the first failure. The subagent is NOT done when its task settles: checks, an independent review (see review_prompt), and one rework pass must all settle first, then the agent finalizes (deferred notification; worktree copy is kept alive through the package). The result carries the checks/review report. Works with run_in_background (you'll be notified only when the package settles). Currently refused with resume or schedule.",
+              "Deterministic bash commands gating this agent's completion (the checks of its quality gate) — run sequentially in the agent's working cwd (worktree override > caller cwd > parent cwd), stop at the first failure. A gated subagent is NOT done when its task settles: checks + an independent review (see review_prompt) + one rework pass all settle first, then the agent finalizes (deferred notification; worktree copy kept alive through the package). Result carries the checks/review report. Works with run_in_background, worktree, cwd, resume, and schedule.",
           }),
         ),
       ),
       review_prompt: Type.Optional(
         Type.String({
           description:
-            "Scope for the review agent in a gated run: on every completed run (checks PASS or FAIL) a fresh-context agent (type general) receives this prompt plus the agent's result and the check outcomes, and its reply is fed back into the task agent's session as repair feedback before the checks run again. Omit to use a default review scope. The review agent is not itself gated (review IS the quality gate) — it never triggers its own checks/review loop.",
+            "Scope for the quality gate's review agent: on every completed run (checks PASS or FAIL) the dedicated read-only `review`/`Review` agent receives this prompt plus the agent's result and the check outcomes, and its reply is fed back into the task agent's session as repair feedback before the checks run again. Omit to use a default review scope. The review agent is not itself gated.",
         }),
       ),
       ...isolationParam(isWorktreeIsolationEnabled()),
