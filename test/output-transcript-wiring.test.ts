@@ -116,25 +116,6 @@ describe("output_transcript agent wiring", () => {
     await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
   });
 
-  it("also suppresses the background transcript", async () => {
-    writeFileSync(join(agentDir, "agents", "sensitive.md"), `---\ndescription: Sensitive in-memory agent\noutput_transcript: false\nrun_in_background: true\n---\n\nKeep data in memory.`);
-    const { pi, tools, lifecycle } = makePi();
-    subagentsExtension(pi);
-
-    await tools.get("Agent").execute(
-      "tool-call",
-      { prompt: "process sensitive data", description: "Process sensitive data", subagent_type: "sensitive" },
-      undefined,
-      undefined,
-      makeCtx(cwd),
-    );
-
-    expect(createOutputFilePath).not.toHaveBeenCalled();
-    expect(writeInitialEntry).not.toHaveBeenCalled();
-    expect(streamToOutputFile).not.toHaveBeenCalled();
-    await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
-  });
-
   it("keeps transcript creation as the default", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);

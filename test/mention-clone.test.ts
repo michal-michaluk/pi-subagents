@@ -284,7 +284,9 @@ describe("attributing the spawn to the real session", () => {
     expect(tool.execute.mock.calls[0][0]).toBeUndefined();
   });
 
-  it("forwards the parameters the clone chose", async () => {
+  it("forwards the parameters the clone chose verbatim, injecting nothing", async () => {
+    // No `run_in_background` is added: the main ctx's mode ("tui") is what
+    // detaches the spawn, and the handler no longer accepts such a parameter.
     const tool = agentTool();
     cloneSession(callsAgent({ subagent_type: "Plan", prompt: "sketch the migration" }));
 
@@ -293,36 +295,7 @@ describe("attributing the spawn to the real session", () => {
     expect(tool.execute.mock.calls[0][1]).toEqual({
       subagent_type: "Plan",
       prompt: "sketch the migration",
-      run_in_background: true,
     });
-  });
-
-  it("forces the spawn into the background — a foreground result goes nowhere", async () => {
-    // `run_in_background` defaults to false, and a foreground agent returns its
-    // answer as the TOOL RESULT: AgentManager marks the record `resultConsumed`
-    // precisely so the completion notification is skipped as redundant. Here
-    // that tool result lands in the throwaway clone, which is disposed moments
-    // later — so the agent runs to completion, shows up in the widget and the
-    // fleet, and its answer reaches nobody. The main conversation is not part
-    // of the clone's turn, so background delivery is the only way back.
-    const tool = agentTool();
-    cloneSession(callsAgent({ subagent_type: "Explore", prompt: "go" }));
-
-    await runMentionClone(opts({ agentTool: tool }));
-
-    expect(tool.execute.mock.calls[0][1]).toMatchObject({ run_in_background: true });
-  });
-
-  it("overrides a clone that explicitly asked for a foreground run", async () => {
-    // Nothing tells the clone's model that its own turn is discarded, so an
-    // explicit `false` is a reasonable thing for it to emit. It must not decide
-    // this one.
-    const tool = agentTool();
-    cloneSession(callsAgent({ subagent_type: "Explore", prompt: "go", run_in_background: false }));
-
-    await runMentionClone(opts({ agentTool: tool }));
-
-    expect(tool.execute.mock.calls[0][1]).toMatchObject({ run_in_background: true });
   });
 
   it("refuses a second spawn from the same mention", async () => {

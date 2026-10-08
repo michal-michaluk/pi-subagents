@@ -41,8 +41,8 @@ function runSpendingNothing() {
 const spawn = (tools: Map<string, any>, toolCallId: string | undefined) =>
   tools.get("Agent").execute(
     toolCallId,
-    { prompt: "go", description: "spend", subagent_type: "general-purpose", run_in_background: false },
-    undefined, undefined, ctx(),
+    { prompt: "go", description: "spend", subagent_type: "general-purpose" },
+    undefined, undefined, ctx({ mode: "print" }),
   );
 
 describe("reporting subagent usage back to the parent session", () => {
@@ -183,7 +183,7 @@ describe("reporting subagent usage back to the parent session", () => {
 
     const started = await tools.get("Agent").execute(
       "tc-2",
-      { prompt: "more", description: "spend", subagent_type: "general-purpose", resume: id, run_in_background: true },
+      { prompt: "more", description: "spend", subagent_type: "general-purpose", resume: id },
       undefined, undefined, ctx(),
     );
     await flush();
@@ -253,7 +253,7 @@ describe("reporting subagent usage back to the parent session", () => {
     const id = pi.events.emit.mock.calls.find((c: any[]) => c[0] === "subagents:completed")?.[1]?.id;
     const result = await tools.get("Agent").execute(
       "tc-2",
-      { prompt: "more", description: "spend", subagent_type: "general-purpose", resume: id, run_in_background: false },
+      { prompt: "more", description: "spend", subagent_type: "general-purpose", resume: id },
       undefined, undefined, ctx(),
     );
 

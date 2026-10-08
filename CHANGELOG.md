@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Breaking — `run_in_background` is removed; background-vs-foreground now follows the run mode.** An interactive (`tui`) or rpc session detaches every `Agent` call — it returns an ID immediately and notifies you on completion — while a single-shot/headless (`json`, `print`) run blocks and returns the result inline; an unset mode reads as foreground. The `backgroundByDefault` setting and its `/agents → Settings → Background by default` toggle are gone, and the parameter no longer exists in the `Agent` tool schema or as agent-file frontmatter. **Migration:** delete `run_in_background` from any agent file or `subagents.json` — it is ignored, and the behavior is now automatic. Nested spawns are unchanged: a child session is bound without a mode, so it stays foreground.
+
 ### Added
 - **Gated runs now combine `checks` with `resume` and `schedule`** (the last two postponements from the gated package model). A gated resume treats the resumed turn as a package: the record stays in flight while checks → review → rework settle, `record.promise` is the package promise (so a waiter unblocks at package end, not the resumed turn's end), and finalization (notification + worktree cleanup) is deferred to `finalizeGated`. A gated scheduled job fires a normal gated background spawn at its trigger, and the scheduler's success/error accounting keys off the package promise, so `lastStatus`/`runCount` update only after the whole package settles. A worktree agent spawned without `checks` and later resumed with them is refused — its spawn-time worktree cleanup state was never captured, so accepting it would leak the copy.
+
+### Changed
+- **BREAKING: `run_in_background` is removed and the background/foreground decision is derived from pi's run mode** (see the breaking note above). The `Agent` tool now asks `modeRunsInBackground(ctx.mode)` instead of reading a caller-supplied flag, so the model can no longer choose to block a turn or detach work nobody will collect. The `backgroundByDefault` setting, its Settings toggle, the resolver's `run_in_background`/`defaultRunInBackground` precedence, and the agent-file `run_in_background` frontmatter (loader and writer) are all removed; the tool description no longer advertises the parameter.
 
 ## [0.18.0] - 2026-08-20
 

@@ -51,11 +51,14 @@
  *   - it is called with no tool-call id. The clone's turn produces one, but the
  *     real session never issued it, and a `<tool-use-id>` pointing at nothing
  *     is exactly the bug the mention-resume path had to fix;
- *   - and it is forced into the background. A foreground agent returns its
- *     answer as the tool result and is marked `resultConsumed` so no completion
- *     notification is sent — correct when the caller is the real conversation,
- *     silent loss when the caller is a fork about to be discarded. Background
- *     delivery is the only route from a mention back to the main model.
+ *   - and it runs detached, because it is called with the main `ctx`, whose
+ *     mode is `"tui"` — the only mode a mention dispatches from — and the
+ *     Agent tool derives background from the run mode. A foreground agent
+ *     returns its answer as the tool result and is marked `resultConsumed` so
+ *     no completion notification is sent — correct when the caller is the real
+ *     conversation, silent loss when the caller is a fork about to be
+ *     discarded. Background delivery is the only route from a mention back to
+ *     the main model.
  *
  * The clone gets one tool and one job. It cannot read, write or run anything —
  * an invisible turn with the full toolset could do invisible work.
@@ -115,14 +118,14 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
         });
       }
       spawned = true;
-      // undefined tool-call id + the main ctx: see the header. Background is
-      // forced rather than left to the clone: `run_in_background` defaults to
-      // false, and a foreground agent answers through its TOOL RESULT — which
-      // here is delivered into a session that is disposed moments later, so the
-      // agent would run, appear in the widget and the fleet, and reach nobody.
+      // undefined tool-call id + the main ctx: see the header. The main ctx's
+      // mode is "tui", so the Agent tool runs this detached — a foreground
+      // agent would answer through its TOOL RESULT, which here is delivered
+      // into a session that is disposed moments later, so the agent would run,
+      // appear in the widget and the fleet, and reach nobody.
       return agentTool.execute(
         undefined as never,
-        { ...(params as Record<string, unknown>), run_in_background: true } as typeof params,
+        params,
         signal,
         onUpdate,
         ctx,

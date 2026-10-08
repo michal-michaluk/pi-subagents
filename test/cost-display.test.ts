@@ -34,8 +34,8 @@ function runSpending(cost: number) {
 const spawn = (tools: Map<string, any>) =>
   tools.get("Agent").execute(
     "tc-1",
-    { prompt: "go", description: "spend", subagent_type: "general-purpose", run_in_background: false },
-    undefined, undefined, ctx(),
+    { prompt: "go", description: "spend", subagent_type: "general-purpose" },
+    undefined, undefined, ctx({ mode: "print" }),
   );
 
 describe("cost display", () => {
@@ -135,8 +135,8 @@ describe("cost display", () => {
     const spawnBackground = (tools: Map<string, any>) =>
       tools.get("Agent").execute(
         "tc-1",
-        { prompt: "go", description: "spend", subagent_type: "general-purpose", run_in_background: true },
-        undefined, undefined, ctx(),
+        { prompt: "go", description: "spend", subagent_type: "general-purpose" },
+        undefined, undefined, ctx({ mode: "tui" }),
       );
 
     it("includes the cost in the usage block when enabled", async () => {

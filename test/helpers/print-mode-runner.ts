@@ -180,7 +180,6 @@ export function agentCall(
     prompt: string;
     description: string;
     subagent_type?: string;
-    run_in_background?: boolean;
     [k: string]: unknown;
   },
   opts?: { id?: string },
@@ -571,8 +570,8 @@ export function invokedToolNames(session: AgentSession): string[] {
 
 /**
  * The arguments of every `Agent` tool call the model actually made — lets a live
- * smoke assert which feature was exercised (e.g. `run_in_background`,
- * `subagent_type`) rather than just that *some* spawn happened.
+ * smoke assert which feature was exercised (e.g. `subagent_type`, `isolation`)
+ * rather than just that *some* spawn happened.
  */
 export function agentToolCalls(session: AgentSession): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];

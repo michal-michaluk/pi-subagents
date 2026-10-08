@@ -51,15 +51,15 @@ describe("documented defaults (README:441)", () => {
     }
   });
 
-  it("top-level spawns default to background, nested spawns to foreground", async () => {
-    const { resolveAgentInvocationConfig } = await import("../src/invocation-config.js");
-    // The setting's default (true) is what index.ts passes for top-level calls.
-    expect(resolveAgentInvocationConfig(undefined, {}, { defaultRunInBackground: true }).runInBackground).toBe(true);
-    // nested-tools.ts passes false unconditionally.
-    expect(resolveAgentInvocationConfig(undefined, {}, { defaultRunInBackground: false }).runInBackground).toBe(false);
-    // An explicit param still wins over either default.
-    expect(resolveAgentInvocationConfig(undefined, { run_in_background: false }, { defaultRunInBackground: true }).runInBackground).toBe(false);
-    expect(resolveAgentInvocationConfig(undefined, { run_in_background: true }, { defaultRunInBackground: false }).runInBackground).toBe(true);
+  it("background follows the run mode: tui/rpc detach, json/print/undefined block", async () => {
+    const { modeRunsInBackground } = await import("../src/invocation-config.js");
+    expect(modeRunsInBackground("tui")).toBe(true);
+    expect(modeRunsInBackground("rpc")).toBe(true);
+    expect(modeRunsInBackground("json")).toBe(false);
+    expect(modeRunsInBackground("print")).toBe(false);
+    // An unset mode (test mocks, unexpected modes) reads as foreground — the
+    // safe default that never detaches work nobody can collect.
+    expect(modeRunsInBackground(undefined)).toBe(false);
   });
 
   it("model scope is off by default", async () => {

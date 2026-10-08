@@ -95,7 +95,6 @@ function respondSpawning(isolation: "worktree" | undefined): (context: Context) 
       // Foreground: this test reads the child's marker out of the parent's
       // inline Agent tool result, which a background spawn replaces with a
       // "started in background" receipt.
-      run_in_background: false,
       description: "worktree work",
       prompt: CHILD_PROMPT,
       ...(isolation ? { isolation } : {}),

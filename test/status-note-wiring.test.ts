@@ -77,7 +77,7 @@ describe("status note reaches the parent through the real handlers", () => {
 
     const res = await tools.get("Agent").execute(
       "tc1",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, ctx(),
     );
 
@@ -114,7 +114,7 @@ describe("status note reaches the parent through the real handlers", () => {
     const parent = new AbortController();
     const call = tools.get("Agent").execute(
       "tc-stop",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       parent.signal, undefined, ctx(),
     );
 
@@ -205,8 +205,8 @@ describe("status note reaches the parent through the real handlers", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc2",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
-      undefined, undefined, ctx(),
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, { ...ctx(), mode: "tui" },
     );
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
     expect(id, "background spawn should surface an agent id").toBeTruthy();

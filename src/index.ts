@@ -26,7 +26,7 @@ import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
-import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { isolationParam, modeRunsInBackground, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -1222,12 +1222,9 @@ export default function (pi: ExtensionAPI) {
   function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
   function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
 
-  // What an unqualified top-level spawn means. Defaults to background,
-  // following Claude Code; `backgroundByDefault: false` restores the previous
-  // foreground default. Nested spawns ignore this — see nested-tools.ts.
-  let backgroundByDefault = true;
-  function getBackgroundByDefault(): boolean { return backgroundByDefault; }
-  function setBackgroundByDefault(b: boolean) { backgroundByDefault = b; }
+  // What an unqualified top-level spawn means is now decided by the run mode
+  // (see `modeRunsInBackground`): tui/rpc detach, json/print block. Nested
+  // spawns follow the same rule off their own context's mode.
 
   // Master switch for the schedule subagent feature. Defaults to enabled.
   // Read once at extension init (before tool registration) so the Agent tool's
@@ -1307,7 +1304,7 @@ export default function (pi: ExtensionAPI) {
    * re-running agent needs: transcript anchoring, activity tracking, join-mode
    * batching, the widget/fleet refresh, and the `subagents:created` event.
    *
-   * Shared by the Agent tool's `resume` + `run_in_background` branch and the
+   * Shared by the Agent tool's detached `resume` branch and the
    * `@handle message` prompt mention — they differ only in how they report the
    * outcome. Returns the record, or undefined when the manager refused because
    * the agent is still running (see AgentManager.resume).
@@ -1347,8 +1344,8 @@ export default function (pi: ExtensionAPI) {
 
     // No `signal`: a background spawn deliberately omits it, and a detached
     // resume must behave the same. Passing it would abort this agent when
-    // the parent turn is interrupted (user Esc), while agents started with
-    // run_in_background in that same turn keep going.
+    // the parent turn is interrupted (user Esc), while detached agents started
+    // in that same turn keep going.
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
       gate: opts.gate,
@@ -1446,7 +1443,6 @@ export default function (pi: ExtensionAPI) {
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
-      setBackgroundByDefault,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
@@ -1479,7 +1475,7 @@ export default function (pi: ExtensionAPI) {
         description:
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
-          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+          'Runs in the background when it fires; incompatible with inherit_context and resume. Returns job ID.',
       }),
     ),
   };
@@ -1516,7 +1512,7 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
 - Parallel work: one message, multiple Agent calls — they run concurrently.
-- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
+- Subagents normally run detached; you'll be notified when one completes — do not poll, and never fabricate or predict a pending agent's results. In a single-shot/headless run the call blocks and returns the result inline instead.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
@@ -1539,8 +1535,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
+- **Background vs foreground**: in an interactive or rpc session the agent runs detached — the call returns its ID immediately and you are notified on completion, so do NOT sleep, poll, or proactively check on its progress; continue with other work or respond to the user instead. In a single-shot/headless run the call blocks and returns the agent's full output inline. The run mode decides this, not you.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
@@ -1658,14 +1653,9 @@ Terse command-style prompts produce shallow, generic work.
           minimum: 1,
         }),
       ),
-      run_in_background: Type.Optional(
-        Type.Boolean({
-          description: "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
-        }),
-      ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn in an interactive session and blocks in a headless one. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
       isolated: Type.Optional(
@@ -1682,7 +1672,7 @@ Terse command-style prompts produce shallow, generic work.
         Type.Array(
           Type.String({
             description:
-              "Deterministic bash commands gating this agent's completion (the checks of its quality gate) — run sequentially in the agent's working cwd (worktree override > caller cwd > parent cwd), stop at the first failure. A gated subagent is NOT done when its task settles: checks + an independent review (see review_prompt) + one rework pass all settle first, then the agent finalizes (deferred notification; worktree copy kept alive through the package). Result carries the checks/review report. Works with run_in_background, worktree, cwd, resume, and schedule.",
+              "Deterministic bash commands gating this agent's completion (the checks of its quality gate) — run sequentially in the agent's working cwd (worktree override > caller cwd > parent cwd), stop at the first failure. A gated subagent is NOT done when its task settles: checks + an independent review (see review_prompt) + one rework pass all settle first, then the agent finalizes (deferred notification; worktree copy kept alive through the package). Result carries the checks/review report. Works with worktree, cwd, resume, and schedule.",
           }),
         ),
       ),
@@ -1854,7 +1844,7 @@ Terse command-style prompts produce shallow, generic work.
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
-        defaultRunInBackground: getBackgroundByDefault(),
+        runInBackground: modeRunsInBackground(ctx.mode),
       });
 
       // Resolve model from agent config first; tool-call params only fill gaps.
@@ -1885,7 +1875,7 @@ Terse command-style prompts produce shallow, generic work.
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
-      let runInBackground = resolvedConfig.runInBackground;
+      const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
       // Whether this spawn writes its .output transcript. Per-agent
@@ -1931,8 +1921,8 @@ Terse command-style prompts produce shallow, generic work.
 
       // ---- Gated runs (`checks`): the package is task+check+review+rework. ----
       // `gate` rides the spawn options; the manager defers finalization until
-      // the whole package settles (see `runGatedPackage`). Valid with
-      // run_in_background (deferred notification), worktree (copy stays alive),
+      // the whole package settles (see `runGatedPackage`). Valid with a
+      // detached spawn (deferred notification), worktree (copy stays alive),
       // resume (package promise + gated settle, see startResume), and schedule
       // (the scheduler threads `gate` into its fired spawn, see executeJob).
       const gateParams = params.checks?.length
@@ -1949,9 +1939,6 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (params.inherit_context) {
           return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
-        }
-        if (params.run_in_background === false) {
-          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
         }
         if (!scheduler.isActive()) {
           return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
@@ -2007,8 +1994,8 @@ Terse command-style prompts produce shallow, generic work.
         }
 
         // Background resume: detached run that notifies on completion, mirroring
-        // a background spawn. Previously run_in_background was silently ignored
-        // on resume (this branch returned before the background branch below),
+        // a background spawn. Previously a detached resume was not wired here
+        // (this branch returned before the background branch below),
         // so a resumed agent always blocked the main loop until it finished.
         if (runInBackground) {
           const id = existing.id;
@@ -2867,7 +2854,6 @@ extensions: <true (inherit all MCP/extension tools), false (none), or comma-sepa
 skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
-run_in_background: <pin this agent to background (true) or foreground (false). Omit to follow the backgroundByDefault setting, which is background>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
@@ -3007,7 +2993,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
-      backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
       strictAgentFiles,
@@ -3092,13 +3077,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Default join mode for background agents",
           currentValue: getDefaultJoinMode(),
           values: ["smart", "async", "group"],
-        },
-        {
-          id: "backgroundByDefault",
-          label: "Background by default",
-          description: "An Agent call that doesn't say runs detached (off = blocks the turn and returns inline)",
-          currentValue: getBackgroundByDefault() ? "on" : "off",
-          values: ["on", "off"],
         },
         {
           id: "schedulingEnabled",
@@ -3240,15 +3218,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
         notifyApplied(ctx, `Default join mode set to ${value}`);
-      } else if (id === "backgroundByDefault") {
-        const enabled = value === "on";
-        setBackgroundByDefault(enabled);
-        notifyApplied(
-          ctx,
-          enabled
-            ? "Agent calls run in the background unless they pass run_in_background: false"
-            : "Agent calls block and return inline unless they pass run_in_background: true",
-        );
       } else if (id === "schedulingEnabled") {
         const enabled = value === "on";
         if (enabled === isSchedulingEnabled()) {

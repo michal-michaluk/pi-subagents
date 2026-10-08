@@ -43,6 +43,7 @@ function makePi() {
 
 function ctx() {
   return {
+    mode: "tui",
     hasUI: false,
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
     cwd: process.cwd(),
@@ -59,7 +60,7 @@ async function spawnBackground(tools: Map<string, any>): Promise<string> {
   vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // never resolves
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "registry test agent", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "registry test agent", subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),

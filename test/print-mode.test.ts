@@ -64,7 +64,7 @@ function makeHeadlessCtx() {
   } as any;
 }
 
-describe("print mode background notifications", () => {
+describe("background completion notifications", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
@@ -89,11 +89,10 @@ describe("print mode background notifications", () => {
         prompt: "reply done",
         description: "tiny child",
         subagent_type: "general-purpose",
-        run_in_background: true,
       },
       undefined,
       undefined,
-      makeHeadlessCtx(),
+      { ...makeHeadlessCtx(), mode: "tui" },
     );
 
     await vi.advanceTimersByTimeAsync(100); // smart-join batch debounce

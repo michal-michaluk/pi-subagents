@@ -12,11 +12,13 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     systemPrompt: "Test agent",
     promptMode: "replace",
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
     ...overrides,
   };
 }
+
+/** Every call needs the mode-derived background decision; foreground is the inert default here. */
+const foreground = { runInBackground: false } as const;
 
 describe("resolveAgentInvocationConfig", () => {
   it("prefers agent config over tool-call params for locked fields", () => {
@@ -26,7 +28,6 @@ describe("resolveAgentInvocationConfig", () => {
         thinking: "high",
         maxTurns: 42,
         inheritContext: false,
-        runInBackground: false,
         isolated: false,
         isolation: "worktree",
       }),
@@ -35,10 +36,10 @@ describe("resolveAgentInvocationConfig", () => {
         thinking: "minimal",
         max_turns: 1,
         inherit_context: true,
-        run_in_background: true,
         isolated: true,
         isolation: "worktree",
       },
+      foreground,
     );
 
     expect(resolved.modelInput).toBe("provider/config-model");
@@ -46,93 +47,108 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.thinking).toBe("high");
     expect(resolved.maxTurns).toBe(42);
     expect(resolved.inheritContext).toBe(false);
-    expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
     expect(resolved.isolation).toBe("worktree");
   });
 
   it("uses tool-call params when no agent config is available", () => {
-    const resolved = resolveAgentInvocationConfig(undefined, {
-      model: "provider/param-model",
-      thinking: "minimal",
-      max_turns: 3,
-      inherit_context: true,
-      run_in_background: true,
-      isolated: true,
-      isolation: "worktree",
-    });
+    const resolved = resolveAgentInvocationConfig(
+      undefined,
+      {
+        model: "provider/param-model",
+        thinking: "minimal",
+        max_turns: 3,
+        inherit_context: true,
+        isolated: true,
+        isolation: "worktree",
+      },
+      foreground,
+    );
 
     expect(resolved.modelInput).toBe("provider/param-model");
     expect(resolved.modelFromParams).toBe(true);
     expect(resolved.thinking).toBe("minimal");
     expect(resolved.maxTurns).toBe(3);
     expect(resolved.inheritContext).toBe(true);
-    expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
     expect(resolved.isolation).toBe("worktree");
   });
 
   it("lets parent fill in booleans when config leaves them undefined", () => {
     const resolved = resolveAgentInvocationConfig(
-      makeConfig({
-        inheritContext: undefined,
-        runInBackground: undefined,
-        isolated: undefined,
-      }),
-      {
-        inherit_context: true,
-        run_in_background: true,
-        isolated: true,
-      },
+      makeConfig({ inheritContext: undefined, isolated: undefined }),
+      { inherit_context: true, isolated: true },
+      foreground,
     );
 
     expect(resolved.inheritContext).toBe(true);
-    expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
   });
 
   it("defaults booleans to false when neither config nor params set them", () => {
     const resolved = resolveAgentInvocationConfig(
-      makeConfig({
-        inheritContext: undefined,
-        runInBackground: undefined,
-        isolated: undefined,
-      }),
+      makeConfig({ inheritContext: undefined, isolated: undefined }),
       {},
+      foreground,
     );
 
     expect(resolved.inheritContext).toBe(false);
-    expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
+  });
+
+  // The background/foreground decision is no longer a per-call choice: it comes
+  // straight from the mode-derived option, never from the agent config or the
+  // (removed) `run_in_background` param.
+  it("takes runInBackground from the options, not from config or params", () => {
+    expect(resolveAgentInvocationConfig(undefined, {}, { runInBackground: true }).runInBackground).toBe(true);
+    expect(resolveAgentInvocationConfig(undefined, {}, { runInBackground: false }).runInBackground).toBe(false);
+    const withIgnoredParam = resolveAgentInvocationConfig(
+      undefined,
+      { run_in_background: false } as Parameters<typeof resolveAgentInvocationConfig>[1],
+      { runInBackground: true },
+    );
+    expect(withIgnoredParam.runInBackground).toBe(true);
   });
 
   // "off" exists so a model that cannot bring itself to omit an optional field
   // has a legal way to say no (#231). It is an input spelling only — the
   // resolver collapses it to undefined so no consumer downstream grows a branch.
   it('collapses a param isolation of "off" to undefined', () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: undefined }), { isolation: "off" });
+    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: undefined }), { isolation: "off" }, foreground);
     expect(resolved.isolation).toBeUndefined();
   });
 
   // Agent config outranks tool-call params, so "off" in frontmatter is the only
   // way to veto a caller's worktree — before #231 no value could do this.
   it('lets a config isolation of "off" veto a param "worktree"', () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: "off" }), { isolation: "worktree" });
+    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: "off" }), { isolation: "worktree" }, foreground);
     expect(resolved.isolation).toBeUndefined();
   });
 
   it('still honours a param "worktree" when the config leaves isolation unset', () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: undefined }), { isolation: "worktree" });
+    const resolved = resolveAgentInvocationConfig(
+      makeConfig({ isolation: undefined }),
+      { isolation: "worktree" },
+      foreground,
+    );
     expect(resolved.isolation).toBe("worktree");
   });
 
   it("drops worktree isolation when the project disallows it", () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: "worktree" }), { isolation: "worktree" }, { worktreeAllowed: false });
+    const resolved = resolveAgentInvocationConfig(
+      makeConfig({ isolation: "worktree" }),
+      { isolation: "worktree" },
+      { worktreeAllowed: false, runInBackground: false },
+    );
     expect(resolved.isolation).toBeUndefined();
   });
 
   it("keeps worktree isolation when the project allows it", () => {
-    const resolved = resolveAgentInvocationConfig(makeConfig({ isolation: "worktree" }), {}, { worktreeAllowed: true });
+    const resolved = resolveAgentInvocationConfig(
+      makeConfig({ isolation: "worktree" }),
+      {},
+      { worktreeAllowed: true, runInBackground: false },
+    );
     expect(resolved.isolation).toBe("worktree");
   });
 });

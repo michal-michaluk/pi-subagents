@@ -63,7 +63,7 @@ function heldRun() {
 async function spawnBackground(tools: Map<string, any>): Promise<string> {
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "steer wiring agent", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "steer wiring agent", subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),

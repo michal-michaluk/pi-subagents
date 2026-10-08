@@ -72,23 +72,20 @@ describe("Agent startup failures fail the tool call (#179)", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  for (const background of [false, true]) {
-    it(`rejects instead of returning the diagnostic (run_in_background: ${background})`, async () => {
-      const tools = boot();
+  it("rejects instead of returning the diagnostic", async () => {
+    const tools = boot();
 
-      await expect(
-        tools.get("Agent").execute(
-          "tc-1",
-          {
-            prompt: "do it",
-            description: "worktree probe",
-            subagent_type: "general-purpose",
-            isolation: "worktree",
-            run_in_background: background,
-          },
-          undefined, undefined, ctx(),
-        ),
-      ).rejects.toThrow('Cannot run with isolation: "worktree"');
-    });
-  }
+    await expect(
+      tools.get("Agent").execute(
+        "tc-1",
+        {
+          prompt: "do it",
+          description: "worktree probe",
+          subagent_type: "general-purpose",
+          isolation: "worktree",
+        },
+        undefined, undefined, ctx(),
+      ),
+    ).rejects.toThrow('Cannot run with isolation: "worktree"');
+  });
 });

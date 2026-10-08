@@ -1,5 +1,18 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { AgentConfig, IsolationMode, JoinMode, ThinkingLevel } from "./types.js";
+
+/**
+ * Whether a run at this mode is detached. The whole background/foreground
+ * decision, single-sourced so the tool schema and both resolvers cannot drift:
+ * interactive (`tui`) and rpc runs return the agent's ID immediately and notify
+ * on completion; headless runs (`json`, `print`) block and return the result
+ * inline. An unset mode — a test mock or a mode pi adds later — reads as
+ * foreground, the safe default because it never detaches work nobody can collect.
+ */
+export function modeRunsInBackground(mode: ExtensionContext["mode"] | undefined): boolean {
+  return mode === "tui" || mode === "rpc";
+}
 
 /**
  * The model-facing `isolation` parameter, shared by the `Agent` tool and the
@@ -58,7 +71,6 @@ interface AgentInvocationParams {
   model?: string;
   thinking?: string;
   max_turns?: number;
-  run_in_background?: boolean;
   inherit_context?: boolean;
   isolated?: boolean;
   /**
@@ -81,22 +93,20 @@ interface ResolveOptions {
    */
   worktreeAllowed?: boolean;
   /**
-   * What an unqualified spawn means — neither the call nor the agent file said.
-   *
-   * Top-level callers pass the `backgroundByDefault` setting (default `true`,
-   * following Claude Code). Nested callers pass `false` unconditionally: a
-   * detached child is killed by `abortOwnedChildren` when its parent settles
-   * and has no notification path of its own, so backgrounding one loses its
-   * work. Both call sites pass it explicitly; the `false` fallback only covers
-   * a caller that supplies no options at all, which in-tree means tests.
+   * Whether this spawn runs detached, derived from pi's run mode by
+   * `modeRunsInBackground`. Both call sites pass it explicitly from the
+   * session's `ctx.mode`, so the decision belongs to the environment rather
+   * than the model: tui/rpc detach, json/print block. A nested child's context
+   * is bound without a mode, which resolves to foreground — the detached-child
+   * trap `abortOwnedChildren` would otherwise set.
    */
-  defaultRunInBackground?: boolean;
+  runInBackground: boolean;
 }
 
 export function resolveAgentInvocationConfig(
   agentConfig: AgentConfig | undefined,
   params: AgentInvocationParams,
-  opts?: ResolveOptions,
+  opts: ResolveOptions,
 ): {
   modelInput?: string;
   modelFromParams: boolean;
@@ -119,7 +129,7 @@ export function resolveAgentInvocationConfig(
     thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
-    runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,
+    runInBackground: opts.runInBackground,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation,
   };

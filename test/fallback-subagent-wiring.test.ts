@@ -101,28 +101,25 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     return { pi, tools, lifecycle };
   }
 
-  for (const background of [false, true]) {
-    it(`refuses an unknown type without spawning (run_in_background: ${background})`, async () => {
-      const { tools } = boot();
-      setFallbackSubagent(NO_FALLBACK);
+  it("refuses an unknown type without spawning", async () => {
+    const { tools } = boot();
+    setFallbackSubagent(NO_FALLBACK);
 
-      const result = await tools.get("Agent").execute(
-        "tc-1",
-        {
-          prompt: "do it",
-          description: "typo dispatch",
-          subagent_type: "definitely-missing",
-          run_in_background: background,
-        },
-        undefined, undefined, ctx(),
-      );
+    const result = await tools.get("Agent").execute(
+      "tc-1",
+      {
+        prompt: "do it",
+        description: "typo dispatch",
+        subagent_type: "definitely-missing",
+      },
+      undefined, undefined, ctx(),
+    );
 
-      expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
-      expect(textOf(result)).toContain("scout");
-      // The whole point: nothing ran.
-      expect(runAgent).not.toHaveBeenCalled();
-    });
-  }
+    expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
+    expect(textOf(result)).toContain("scout");
+    // The whole point: nothing ran.
+    expect(runAgent).not.toHaveBeenCalled();
+  });
 
   it("still falls back — and says so — when the setting is unset", async () => {
     const { tools } = boot();
@@ -155,9 +152,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
         prompt: "do it",
         description: "typo dispatch",
         subagent_type: "definitely-missing",
-        run_in_background: true,
       },
-      undefined, undefined, ctx(),
+      undefined, undefined, { ...ctx(), mode: "tui" },
     );
 
     expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
@@ -215,7 +211,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     });
     const spawned = await tools.get("Agent").execute(
       "tc-6",
-      { prompt: "start", description: "live agent", subagent_type: "scout", run_in_background: false },
+      { prompt: "start", description: "live agent", subagent_type: "scout" },
       undefined, undefined, ctx(),
     );
     const id = /Agent ID: (\S+)/.exec(textOf(spawned))?.[1]

@@ -19,7 +19,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
+import { type Context } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -151,8 +151,6 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
         subagent_type: "orchestrator",
         description: "delegate",
         prompt: "Delegate this downward.",
-        // Foreground: this test reads the parent's inline Agent tool result.
-        run_in_background: false,
       });
     };
 
@@ -178,7 +176,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
     expect(run.responseText).toContain(WORKER_MARKER);
   });
 
-  it("backgrounds a nested child, polls it by id, and streams its transcript", async () => {
+  it("streams a nested child's transcript under the root session", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "nested-e2e-bg-"));
     tmpDirs.push(cwd);
     writeAgents(cwd);
@@ -193,21 +191,13 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       if (text.includes("Delegate this downward")) {
         const results = toolResultTexts(context);
         const spawned = results.find((r) => r.name === "Agent")?.text ?? "";
-        const polled = results.find((r) => r.name === "get_subagent_result")?.text;
-        // Third turn: the poll came back — echo it so a lost result fails loudly.
-        if (polled !== undefined) return `orchestrator polled: ${polled}`;
-        // Second turn: the spawn returned an id; fetch by exactly that id, which
-        // also exercises the manager's ownership check from inside a child.
-        if (spawned) {
-          const id = /Agent ID:\s*(\S+)/.exec(spawned)?.[1];
-          expect(id).toBeTruthy();
-          return fauxToolCall("get_subagent_result", { agent_id: id, wait: true });
-        }
+        // A child session is bound without a mode, so the nested spawn is
+        // foreground: the result is inline, not an id to poll.
+        if (spawned) return `orchestrator saw: ${spawned}`;
         return agentCall({
           subagent_type: "worker",
           description: "leaf work",
           prompt: "Do the leaf work.",
-          run_in_background: true,
         });
       }
 
@@ -216,8 +206,6 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
         subagent_type: "orchestrator",
         description: "delegate",
         prompt: "Delegate this downward.",
-        // Foreground: this test reads the parent's inline Agent tool result.
-        run_in_background: false,
       });
     };
 
@@ -230,13 +218,12 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
         beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
       });
 
-      // The background child ran and its output came back through the id the
-      // spawn handed out — so it was never queued behind its waiting parent.
+      // The nested child's output travelled back inline through the owning
+      // parent's scoped Agent tool.
       const orchestratorResult = run.parentSession.messages
         .filter((m) => m.role === "toolResult")
         .flatMap((m) => (m.content as Array<{ text?: string }>).map((b) => b.text ?? ""))
         .join("\n");
-      expect(orchestratorResult).toContain("orchestrator polled");
       expect(orchestratorResult).toContain(WORKER_MARKER);
 
       // Only the REAL manager wires onSessionCreated → streamToOutputFile for a
@@ -245,10 +232,6 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       // initial entry — matching the marker alone would also match the
       // orchestrator's transcript, which merely echoes it, and would pass even
       // with nested transcripts switched off entirely.
-      // Match on the FIRST line — writeInitialEntry seeds each transcript with the
-      // prompt that agent was given. Searching the whole file would also match the
-      // orchestrator's, which records the same string inside its Agent tool-call
-      // arguments, and would pass with nested transcripts switched off entirely.
       const transcripts = findOutputFiles(transcriptRoot).map((f) => readFileSync(f, "utf-8"));
       const workerTranscript = transcripts.find((t) => {
         const first = JSON.parse(t.split("\n")[0]) as { message?: { content?: unknown } };

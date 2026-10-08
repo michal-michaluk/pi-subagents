@@ -36,12 +36,12 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 /**
  * Default max concurrent background agents.
  *
- * Raised from 4 when top-level spawns started defaulting to background
- * (`backgroundByDefault`): foreground agents bypass this pool entirely, so
- * while foreground was the default a fan-out of six ran six. With background
- * as the default every top-level agent takes a slot, and a limit of 4 would
- * have silently queued the tail of exactly the parallel fan-outs the `Agent`
- * tool description tells the model to send.
+ * Raised from 4 when top-level spawns started defaulting to background:
+ * foreground agents bypass this pool entirely, so
+ * while foreground was the default a fan-out of six ran six. Now that an
+ * interactive session detaches every top-level agent, each takes a slot, and a
+ * limit of 4 would have queued the tail of exactly the parallel fan-outs the
+ * `Agent` tool description tells the model to send.
  */
 const DEFAULT_MAX_CONCURRENT = 10;
 
@@ -802,10 +802,10 @@ export class AgentManager {
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
-    // "running" — or "queued" when at the concurrency limit. Previously
-    // run_in_background was ignored on resume (the Agent tool's resume branch
-    // returned before its background branch, and resume() only ever awaited
-    // inline), so a resumed agent always blocked the caller until it finished.
+    // "running" — or "queued" when at the concurrency limit. Previously a
+    // detached resume was not wired to this path (the Agent tool's resume
+    // branch returned before its background branch, and resume() only ever
+    // awaited inline), so a resumed agent always blocked the caller.
     if (options?.isBackground) {
       // Never re-enter a run that is still in flight. Detaching means the caller
       // gets control back while the record stays "running", so nothing stops the

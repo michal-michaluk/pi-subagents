@@ -1,9 +1,10 @@
 /**
- * Agent tool wiring for `resume` + `run_in_background` (#214).
+ * Agent tool wiring for a detached `resume`.
  *
  * The manager-level mechanics live in agent-manager.test.ts; what this file
  * pins down is what the TOOL hands the manager, which is where a detached
- * resume can quietly diverge from a detached spawn.
+ * resume can quietly diverge from a detached spawn. Background is implied by
+ * the run mode (`tui`), so `makeCtx` carries it.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,6 +52,7 @@ function makePi() {
 
 function makeCtx(cwd: string) {
   return {
+    mode: "tui",
     hasUI: false,
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
     cwd,
@@ -130,7 +132,7 @@ describe("Agent tool — background resume wiring", () => {
   async function spawnSettled(tools: Map<string, any>, ctx: any, type = "general-purpose") {
     const res = await tools.get("Agent").execute(
       "spawn-call",
-      { prompt: "first task", description: "First task", subagent_type: type, run_in_background: true },
+      { prompt: "first task", description: "First task", subagent_type: type },
       undefined,
       undefined,
       ctx,
@@ -160,7 +162,7 @@ describe("Agent tool — background resume wiring", () => {
     const toolAbort = new AbortController();
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true },
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id },
       toolAbort.signal,
       undefined,
       ctx,
@@ -190,7 +192,7 @@ describe("Agent tool — background resume wiring", () => {
 
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true },
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id },
       undefined,
       undefined,
       ctx,
@@ -221,7 +223,7 @@ describe("Agent tool — background resume wiring", () => {
     emitted.length = 0;
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Different description", subagent_type: "explorer", resume: id, run_in_background: true },
+      { prompt: "keep going", description: "Different description", subagent_type: "explorer", resume: id },
       undefined,
       undefined,
       ctx,
@@ -249,7 +251,7 @@ describe("Agent tool — background resume wiring", () => {
     vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
     vi.mocked(resumeAgent).mockClear();
 
-    const params = { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true };
+    const params = { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id };
     await tools.get("Agent").execute("resume-1", params, undefined, undefined, ctx);
     const second = await tools.get("Agent").execute("resume-2", params, undefined, undefined, ctx);
 
@@ -261,9 +263,9 @@ describe("Agent tool — background resume wiring", () => {
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });
 
-  // Resume follows the same default as a fresh spawn — background — so
-  // foreground is now the explicit case rather than the implicit one.
-  it("still resumes in the foreground when run_in_background is false", async () => {
+  // Resume follows the same rule as a fresh spawn: detached in a `tui`/`rpc`
+  // session, inline in a headless one. Foreground is now the explicit case.
+  it("resumes in the foreground in a headless session", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     const ctx = makeCtx(cwd);
@@ -272,10 +274,10 @@ describe("Agent tool — background resume wiring", () => {
     vi.mocked(resumeAgent).mockResolvedValue({ text: "inline answer" } as any);
     const res = await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false },
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id },
       undefined,
       undefined,
-      ctx,
+      { ...ctx, mode: "print" },
     );
 
     // Foreground resume returns the answer inline — no background handoff text.

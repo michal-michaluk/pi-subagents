@@ -6,8 +6,8 @@
  *
  * These drive AgentManager directly (mocking runAgent/resumeAgent/worktree),
  * which is where the deferral logic lives. The tool-boundary wiring (gate rides
- * spawn options, run_in_background stays legal) is covered by the unit tests
- * that mock runAgent at the extension level.
+ * the spawn options, detached and foreground runs alike) is covered by the unit
+ * tests that mock runAgent at the extension level.
  *
  * Key assertions:
  *   - a gated task-settle leaves status "running" and does NOT fire onComplete

@@ -1,9 +1,10 @@
 /**
  * gated-tool-wiring.test.ts — the Agent tool's `checks`/`review_prompt` params
- * at the boundary: how the tool now accepts `checks` with `run_in_background`
- * (previously refused), still refuses `resume`/`schedule` (v1 follow-up), and
- * that a gated background spawn returns the agent ID immediately (deferred
- * package notification) while a gated foreground spawn blocks for the package.
+ * at the boundary: how the tool now accepts `checks` in both a detached and a
+ * foreground run (previously refused), still refuses `resume`/`schedule` (v1
+ * follow-up), and that a gated background spawn returns the agent ID
+ * immediately (deferred package notification) while a gated foreground spawn
+ * blocks for the package.
  *
  * Mirrors background-by-default.test.ts: mock runAgent at the extension level,
  * call the real `Agent` tool, assert on the tool result.
@@ -30,7 +31,6 @@ function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     systemPrompt: "You are a test agent.",
     promptMode: "replace",
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
     ...overrides,
   };
@@ -59,10 +59,11 @@ function makePi() {
   return { pi, tools, lifecycle };
 }
 
-function ctx() {
+function ctx(mode: "tui" | "print" = "print") {
   return {
+    mode,
     hasUI: false,
-    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn() },
     cwd: process.cwd(),
     model: undefined,
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
@@ -82,17 +83,17 @@ function settled(text = "done") {
   } as any);
 }
 
-function spawn(tools: Map<string, any>, params: Record<string, unknown> = {}) {
+function spawn(tools: Map<string, any>, params: Record<string, unknown> = {}, mode: "tui" | "print" = "print") {
   return tools.get("Agent").execute(
     "tc",
     { prompt: "go", description: "d", subagent_type: "general-purpose", ...params },
     undefined,
     undefined,
-    ctx(),
+    ctx(mode),
   );
 }
 
-async function runOnce(params: Record<string, unknown> = {}) {
+async function runOnce(params: Record<string, unknown> = {}, mode: "tui" | "print" = "print") {
   const { pi, tools, lifecycle } = makePi();
   subagentsExtension(pi);
   settled();
@@ -101,13 +102,13 @@ async function runOnce(params: Record<string, unknown> = {}) {
   setDefaultsDisabled(true);
   setFallbackSubagent(undefined);
   // session_start sets currentCtx, which runGatedPackage needs to spawn the review.
-  lifecycle.get("session_start")?.(null, ctx());
-  return { out: textOf(await spawn(tools, params)), tools, pi };
+  lifecycle.get("session_start")?.(null, ctx(mode));
+  return { out: textOf(await spawn(tools, params, mode)), tools, pi };
 }
 
 describe("gated tool wiring", () => {
-  it("accepts checks with run_in_background: true — no longer refuses it", async () => {
-    const { out } = await runOnce({ checks: ["true"], run_in_background: true });
+  it("accepts checks in a detached (tui) run — no longer refuses them", async () => {
+    const { out } = await runOnce({ checks: ["true"] }, "tui");
     // Returns the agent ID immediately (background), NOT the result.
     expect(out).toContain("Agent ID:");
     expect(out).not.toContain("Cannot combine `checks`");
@@ -124,7 +125,7 @@ describe("gated tool wiring", () => {
       options.onSessionCreated?.(session);
       return { responseText: "first run", session, aborted: false, steered: false } as any;
     });
-    const spawned = await spawn(tools, { prompt: "first", description: "first", run_in_background: true });
+    const spawned = await spawn(tools, { prompt: "first", description: "first" }, "tui");
     const id = /Agent ID: (\S+)/.exec(textOf(spawned))![1];
     await new Promise((r) => setTimeout(r, 0));
 
@@ -136,22 +137,22 @@ describe("gated tool wiring", () => {
       aborted: false,
       steered: false,
     } as any);
-    const out = textOf(await spawn(tools, { checks: ["true"], resume: id, run_in_background: true }));
+    const out = textOf(await spawn(tools, { checks: ["true"], resume: id }, "tui"));
     expect(out).toContain("resumed in background");
     expect(out).not.toContain("Cannot combine`checks`");
 
     await lifecycle.get("session_shutdown")?.(null, ctx());
   });
 
-  it("starts a gated background run when checks are given without name", async () => {
-    const { out } = await runOnce({ checks: ["true"] });
+  it("starts a gated detached run when checks are given without name", async () => {
+    const { out } = await runOnce({ checks: ["true"] }, "tui");
     expect(out).toContain("Agent ID:");
   });
 
   it("spawns the review agent as the dedicated review type, not a general twin", async () => {
     // A user `review` agent exists → resolves to it, not a `general` twin.
     userAgents.set("review", makeAgentConfig({ name: "review" }));
-    await runOnce({ checks: ["true"], run_in_background: false });
+    await runOnce({ checks: ["true"] });
     // The gate runs checks then spawns the review via runAgent(ctx, type, reviewPrompt, ...).
     const reviewCalls = vi.mocked(runAgent).mock.calls.filter(
       ([, type]) => type === "review" || type === "Review",
@@ -165,7 +166,7 @@ describe("gated tool wiring", () => {
     // No `review`/`Review` agent, no fallbackSubagent → the review must still
     // dispatch (never error) to the general-purpose twin.
     userAgents.clear();
-    await runOnce({ checks: ["true"], run_in_background: false });
+    await runOnce({ checks: ["true"] });
     const reviewCalls = vi.mocked(runAgent).mock.calls.filter(
       ([, type]) => type === "general-purpose",
     );

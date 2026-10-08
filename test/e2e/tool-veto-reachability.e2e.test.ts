@@ -89,7 +89,6 @@ describe("tool veto reachability against real pi-mono", () => {
             systemPrompt: "You are veto.",
             promptMode: "replace",
             inheritContext: false,
-            runInBackground: false,
             isolated: false,
           } as AgentConfig,
         ],

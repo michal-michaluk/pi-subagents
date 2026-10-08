@@ -140,7 +140,7 @@ describe("Agent tool → persisted scheduled job", () => {
   });
 });
 
-// README documents three combinations that scheduling refuses. Each is a
+// README documents the combinations that scheduling refuses. Each is a
 // published contract an orchestrator reads before calling, and none was pinned
 // (`grep "Cannot combine" test/` returned nothing) — so the wording could drift,
 // or a guard could be dropped, without any test noticing. The exact strings are
@@ -202,36 +202,6 @@ describe("Agent tool → schedule restrictions", () => {
       expect(jobCount).toBe(0);
     } finally {
       restore();
-    }
-  });
-
-  it("refuses `schedule` with `run_in_background: false` rather than silently coercing it", async () => {
-    // README:91 long claimed this parameter was "forced to true". It is not —
-    // the call is refused. Silently flipping a parameter the caller explicitly
-    // set is the failure mode #37 was filed about; refusing is the intended
-    // behavior and this pins it.
-    const { reply, jobCount, restore } = await scheduleCall({ run_in_background: false });
-    try {
-      expect(reply).toBe(
-        "Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.",
-      );
-      expect(jobCount).toBe(0);
-    } finally {
-      restore();
-    }
-  });
-
-  it("accepts `run_in_background: true` and an omitted `run_in_background`", async () => {
-    // The mirror: only an explicit `false` is refused, so a caller that sets the
-    // flag by habit is not blocked.
-    for (const params of [{ run_in_background: true }, {}]) {
-      const { reply, jobCount, restore } = await scheduleCall(params);
-      try {
-        expect(reply).toContain("Scheduled");
-        expect(jobCount).toBe(1);
-      } finally {
-        restore();
-      }
     }
   });
 

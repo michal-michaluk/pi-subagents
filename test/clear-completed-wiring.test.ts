@@ -49,8 +49,9 @@ function makePi() {
 
 function ctx() {
   return {
+    mode: "tui",
     hasUI: false,
-    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
+    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn() },
     cwd: process.cwd(),
     model: undefined,
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
@@ -77,7 +78,7 @@ async function spawnCompletedBackgroundAgent(tools: Map<string, any>): Promise<s
   });
   const spawn = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "Review monero_en.rs in depth", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "Review monero_en.rs in depth", subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),

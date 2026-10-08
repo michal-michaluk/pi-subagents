@@ -25,8 +25,9 @@ const MODELS = [
   { id: "blocked", name: "Blocked", provider: "anthropic" },
 ];
 
-function ctx(executionCwd = cwd) {
+function ctx(executionCwd = cwd, mode: "tui" | "print" = "print") {
   return {
+    mode,
     cwd: executionCwd,
     model: undefined,
     modelRegistry: {
@@ -54,8 +55,8 @@ function tools(
   });
 }
 
-async function execute(tool: any, params: Record<string, unknown>, executionCwd = cwd) {
-  return tool.execute("call-1", params, undefined, undefined, ctx(executionCwd));
+async function execute(tool: any, params: Record<string, unknown>, executionCwd = cwd, mode: "tui" | "print" = "print") {
+  return tool.execute("call-1", params, undefined, undefined, ctx(executionCwd, mode));
 }
 
 beforeEach(() => {
@@ -251,13 +252,15 @@ describe("child-safe nested Agent tools", () => {
   });
 
   it("supports background launches and ownership-scopes result, resume, and steer", async () => {
+    // A child session is bound without a mode, so it resolves to foreground in
+    // practice; this pins the background branch that a tui/rpc-bound child
+    // session would take.
     const [agent, getResult, steer] = tools(["scout"]);
     const launched = await execute(agent, {
       subagent_type: "scout",
       description: "find files",
       prompt: "Find them",
-      run_in_background: true,
-    });
+    }, cwd, "tui");
     expect(launched.content[0].text).toContain("child-1");
     expect(spawn).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), "scout", "Find them",
@@ -439,8 +442,7 @@ describe("child-safe nested Agent tools", () => {
       subagent_type: "scout",
       description: "spender",
       prompt: "Do work",
-      run_in_background: true,
-    });
+    }, cwd, "tui");
 
     expect(parent.lifetimeUsage).toEqual({ input: 100, output: 20, cacheWrite: 5 });
   });
@@ -465,8 +467,7 @@ describe("child-safe nested Agent tools", () => {
       subagent_type: "scout",
       description: "deep spender",
       prompt: "Do work",
-      run_in_background: true,
-    });
+    }, cwd, "tui");
 
     expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
     expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
@@ -497,6 +498,23 @@ describe("child-safe nested Agent tools", () => {
     } finally {
       rmSync(transcriptRoot, { recursive: true, force: true });
     }
+  });
+
+  it("resolves to foreground for a child context (mode 'print'), never detaching a nested spawn", async () => {
+    // Child sessions bind without a mode, so `modeRunsInBackground` reads
+    // "print" and the child runs inline — a detached child would be stopped by
+    // `abortOwnedChildren` when its parent settles. Passing `run_in_background`
+    // no longer exists as a lever, but even if it did, the mode decides.
+    const [agent] = tools();
+    await execute(agent, {
+      subagent_type: "scout",
+      description: "nested",
+      prompt: "Do work",
+      run_in_background: true,
+    });
+
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("forwards the execution context to the manager unmodified", async () => {

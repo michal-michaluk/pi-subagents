@@ -108,7 +108,7 @@ function bootDirect(settings: Record<string, unknown> = {}) {
 async function spawnBackground(tools: Map<string, any>, subagent_type = "Explore"): Promise<string> {
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "find flaky tests", subagent_type, run_in_background: true },
+    { prompt: "go", description: "find flaky tests", subagent_type },
     undefined,
     undefined,
     ctx(),
@@ -980,7 +980,7 @@ describe("@agent-<type> — Claude Code's manual spelling", () => {
     await spawnBackground(tools); // plain Explore → @explore
     await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "go", description: "named", subagent_type: "Plan", name: "agent-explore", run_in_background: true },
+      { prompt: "go", description: "named", subagent_type: "Plan", name: "agent-explore" },
       undefined, undefined, ctx(),
     );
     await flush();
@@ -1098,7 +1098,7 @@ describe("resuming an evicted agent by name", () => {
     finishedRun(fakeSession());
     const spawned = await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "audit", description: "audit the auth flow", subagent_type: "Explore", name: "auth-audit", run_in_background: true },
+      { prompt: "audit", description: "audit the auth flow", subagent_type: "Explore", name: "auth-audit" },
       undefined, undefined, ctx(),
     );
     await flush();
@@ -1333,7 +1333,7 @@ describe("handles as tool arguments", () => {
     heldRun(session);
     await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "go", description: "audit", subagent_type: "Explore", name: "auth-audit", run_in_background: true },
+      { prompt: "go", description: "audit", subagent_type: "Explore", name: "auth-audit" },
       undefined, undefined, ctx(),
     );
     await flush();
